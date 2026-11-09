@@ -106,7 +106,15 @@ Future<void> main(List<String> args) async {
   }
 
   final failing = results.where((r) => r.verdict.fails || (strict && r.verdict == _Verdict.noAnswer));
-  exit(failing.isEmpty ? 0 : 1);
+  // A run where many lookups got no answer compared too little to pass.
+  final unanswered = byVerdict[_Verdict.noAnswer]?.length ?? 0;
+  final unreliable = unanswered > results.length * maxUnanswered;
+  if (unreliable) {
+    print('\nUNRELIABLE RUN: $unanswered of ${results.length} lookups got no answer on one '
+        'side (limit ${(maxUnanswered * 100).round()}%). The network or a resolver is failing; '
+        'this says nothing about the validator.');
+  }
+  exit(failing.isEmpty && !unreliable ? 0 : 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +139,10 @@ const _tlds = [
   'br', 'jp', 'au', 'ca', 'us', 'gov', 'edu', 'io', 'dev', 'app', 'xyz',
   'nu', 'be', 'at', 'dk', 'no', 'fi', 'pl', 'it', 'es', 'pt', 'ru', 'cn',
 ];
+
+/// Share of lookups that may go unanswered on one side before the run as a
+/// whole is reported as unreliable.
+const maxUnanswered = 0.10;
 
 /// A label that should not exist anywhere, to exercise denial proofs.
 const _missing = 'x7q-differential';
@@ -376,13 +388,14 @@ class _Comparison {
       ];
       return diffs.isEmpty ? (_Verdict.agree, null) : (_Verdict.data, diffs.join(', '));
     }
+    // Without an answer on one side there is nothing to compare.
+    if (ours.status == SecurityStatus.indeterminate || unbound.status == SecurityStatus.indeterminate) {
+      return (_Verdict.noAnswer, null);
+    }
     final known = _knownDifference(query, ours, unbound);
     if (known != null) return (_Verdict.known, known.reason);
     if (ours.status == SecurityStatus.secure || unbound.status == SecurityStatus.secure) {
       return (_Verdict.security, null);
-    }
-    if (ours.status == SecurityStatus.indeterminate || unbound.status == SecurityStatus.indeterminate) {
-      return (_Verdict.noAnswer, null);
     }
     return (_Verdict.status, null);
   }
