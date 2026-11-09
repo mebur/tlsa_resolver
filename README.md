@@ -63,6 +63,17 @@ final resolver = TlsaResolver(
 );
 ```
 
+`DohTransport` sends queries over DNS over HTTPS (RFC 8484), for networks
+whose resolver strips DNSSEC records or should not see the queries. The
+answers are still validated locally:
+
+```dart
+final resolver = TlsaResolver.inBackground(transport: DohTransport.cloudflare());
+```
+
+It uses `dart:io`'s HTTP/1.1 client, so the server must accept HTTP/1.1;
+Cloudflare and Google do, Quad9's DoH service requires HTTP/2.
+
 The native code is compiled by the package's build hook (`hook/build.dart`,
 `package:native_toolchain_c`); there are no platform plugin classes.
 

@@ -11,6 +11,8 @@ void main() {
   final transports = <String, DnsTransport>{
     'system resolver': const NativeDnsTransport(),
     'direct to 9.9.9.9': DirectDnsTransport(InternetAddress('9.9.9.9')),
+    'DoH to Cloudflare': DohTransport.cloudflare(),
+    'DoH to Google': DohTransport.google(),
   };
 
   for (final MapEntry(key: label, value: transport) in transports.entries) {

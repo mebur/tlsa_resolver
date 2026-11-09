@@ -31,3 +31,5 @@
 * Queries advertise a 1232-byte EDNS0 UDP payload (RFC 9715) instead of
   4096, so large answers come back truncated and are fetched over TCP
   rather than fragmented.
+* `DohTransport`: DNS over HTTPS (RFC 8484), with presets for Cloudflare
+  and Google. Servers must accept HTTP/1.1.

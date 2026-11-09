@@ -129,6 +129,8 @@ final transportOptions = [
   TransportOption('System resolver', () => const NativeDnsTransport()),
   TransportOption('Quad9 (9.9.9.9)', () => DirectDnsTransport(InternetAddress('9.9.9.9'))),
   TransportOption('Cloudflare (1.1.1.1)', () => DirectDnsTransport(InternetAddress('1.1.1.1'))),
+  TransportOption('Cloudflare over HTTPS', DohTransport.cloudflare),
+  TransportOption('Google over HTTPS', DohTransport.google),
 ];
 
 Future<CaseResult> runCase(TlsaResolver resolver, TestCase c) async {

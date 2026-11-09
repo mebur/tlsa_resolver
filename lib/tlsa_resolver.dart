@@ -10,6 +10,7 @@ export 'src/dnssec/validator.dart'
 export 'src/resolver.dart';
 export 'src/tlsa.dart';
 export 'src/transport/direct_transport.dart';
+export 'src/transport/doh_transport.dart';
 export 'src/transport/native_transport.dart';
 export 'src/transport/transport.dart';
 export 'src/wire/message.dart' show RRType, ResourceRecord;

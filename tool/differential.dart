@@ -9,7 +9,7 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 /// validator and with Unbound (`unbound-host`, which recurses and validates
 /// on its own), and reports every answer they disagree on.
 ///
-///   dart run tool/differential.dart [--server 9.9.9.9 | --system]
+///   dart run tool/differential.dart [--server 9.9.9.9 | --system | --doh URL]
 ///       [--unbound-host PATH] [--jobs 8] [--only SUBSTRING] [--strict]
 ///
 /// Both sides use the same root trust anchors. A disagreement is retried
@@ -31,6 +31,10 @@ Future<void> main(List<String> args) async {
       case '--system':
         transportLabel = 'system resolver';
         transport = const NativeDnsTransport();
+      case '--doh':
+        final endpoint = Uri.parse(args[++i]);
+        transportLabel = 'DoH ${endpoint.host}';
+        transport = DohTransport(endpoint);
       case '--unbound-host':
         unboundHost = args[++i];
       case '--jobs':
