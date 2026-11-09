@@ -1,0 +1,3 @@
+// Copy to Signing.xcconfig (gitignored) and set your Apple team ID to sign
+// for physical devices. Find it in Xcode → Settings → Accounts.
+DEVELOPMENT_TEAM = ABCDE12345
