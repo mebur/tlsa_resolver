@@ -139,9 +139,12 @@ abstract final class DaneVerifier {
   }
 
   /// Extracts the DER SubjectPublicKeyInfo from an X.509 certificate:
+  ///
+  /// ```text
   /// Certificate ::= SEQUENCE { tbsCertificate SEQUENCE { [0] version
-  /// OPTIONAL, serialNumber, signature, issuer, validity, subject,
-  /// subjectPublicKeyInfo, ... }, ... }
+  ///   OPTIONAL, serialNumber, signature, issuer, validity, subject,
+  ///   subjectPublicKeyInfo, ... }, ... }
+  /// ```
   static Uint8List subjectPublicKeyInfo(Uint8List der) {
     final cert = _Der(der, 0);
     if (cert.tag != 0x30) throw const FormatException('Certificate is not a SEQUENCE');

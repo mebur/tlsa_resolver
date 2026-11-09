@@ -44,6 +44,40 @@ cache on a long-lived background isolate (`IsolateValidator`); call
 `TlsaResolver()` validates on the calling isolate, which suits command-line
 tools and servers.
 
+## Status
+
+This is a young package. The DNSSEC validator is written for it in Dart and
+has **not been independently audited**. In its place:
+
+* Unit tests run the validator against a signed test hierarchy, including
+  tampered signatures, forged denials, stripped records and KeyTrap-style
+  key-tag collisions.
+* Project Wycheproof's test vectors check the Ed25519, ECDSA and RSA
+  signature verification.
+* A differential test compares every answer with Unbound on about 750 live
+  lookups across many TLDs, algorithms and denial types, in CI on every push
+  and weekly. The only difference is Ed448 (see below).
+* A fuzz test corrupts resolver responses and checks that no tampered
+  answer is ever reported as secure.
+* The live suite in `device_test/` passes on an iPhone (iOS 27) through the
+  system resolver. On Android the package builds but has not yet been run
+  on a device.
+
+Known limits:
+
+* Ed448 (DNSSEC algorithm 16) is not supported; zones signed only with it
+  are treated as unsigned.
+* The root trust anchors are built in and do not update themselves
+  (RFC 5011): a future root key rollover needs a package update, or pass
+  `trustAnchors`.
+* DANE-TA (usage 2) matches are reported with `requiresChainCheck`; building
+  and checking the certificate path to the matched anchor is up to the
+  caller.
+
+Please report security problems privately through GitHub's security
+advisories for [mebur/tlsa_resolver](https://github.com/mebur/tlsa_resolver/security/advisories/new),
+not in public issues.
+
 ## Platforms
 
 | Platform | System resolver API | Notes |

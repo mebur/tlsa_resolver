@@ -8,10 +8,11 @@ import 'validator.dart';
 /// signature checks never block the calling isolate (in a Flutter app, the
 /// UI isolate).
 ///
-/// [create] runs on the background isolate and builds the validator there,
-/// so its transport and zone key cache live there too. Whatever it
-/// captures, such as a transport, is copied to that isolate and must be
-/// sendable (`DirectDnsTransport` and `NativeDnsTransport` are).
+/// The function passed in runs on the background isolate and builds the
+/// validator there, so its transport and zone key cache live there too.
+/// Whatever it captures, such as a transport, is copied to that isolate and
+/// must be sendable (`DirectDnsTransport`, `DohTransport` and
+/// `NativeDnsTransport` are).
 ///
 /// The isolate starts with the first lookup. While it runs it keeps the
 /// program alive; call [close] when done.
