@@ -11,12 +11,21 @@ class TlsaLookupPage extends StatefulWidget {
 }
 
 class _TlsaLookupPageState extends State<TlsaLookupPage> {
-  final _resolver = TlsaResolver();
+  // Validation runs on a background isolate, so it never stalls the UI.
+  final _resolver = TlsaResolver.inBackground();
   final _host = TextEditingController(text: 'mail.ietf.org');
   final _port = TextEditingController(text: '25');
   TlsaResult? _result;
   Object? _error;
   bool _busy = false;
+
+  @override
+  void dispose() {
+    _resolver.close();
+    _host.dispose();
+    _port.dispose();
+    super.dispose();
+  }
 
   Future<void> _lookup() async {
     setState(() => _busy = true);

@@ -17,6 +17,7 @@ const _errors = {
   3: 'the system resolver did not return an answer',
   4: 'the system resolver timed out',
   5: 'the answer was larger than the buffer',
+  6: 'invalid arguments to the native resolver call',
 };
 
 /// Sends queries through the operating system's resolver, so they follow the

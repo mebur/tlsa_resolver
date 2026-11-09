@@ -5,16 +5,29 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    # Weekly, so changes in the corpus zones or in Unbound show up.
+    # Weekly, so changes in the corpus zones, in Unbound or in advisories
+    # show up.
     - cron: '17 5 * * 1'
   workflow_dispatch:
+
+# Jobs only read the repository. Actions are pinned to commits, with the
+# release in a comment; Dependabot proposes updates.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
       - run: flutter pub get
@@ -28,11 +41,63 @@ jobs:
     # Compares the validator with Unbound on ~750 live lookups; see
     # tool/differential.dart.
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: subosito/flutter-action@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
       - run: sudo apt-get update && sudo apt-get install -y unbound-host
       - run: flutter pub get
       - run: dart run tool/differential.dart --server 9.9.9.9
+
+  native:
+    # The C shim on its own, with -Werror and the address and undefined
+    # behaviour sanitizers, against each platform's libresolv.
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Strict warnings
+        run: >-
+          cc -std=gnu11 -Wall -Wextra -Wconversion -Wsign-conversion -Wshadow
+          -Wformat=2 -pedantic -Werror -O2 -D_FORTIFY_SOURCE=2
+          -fstack-protector-strong -Isrc -c src/tlsa_resolver.c -o /dev/null
+      - name: Sanitized test
+        run: |
+          mkdir -p build
+          cc -std=gnu11 -Wall -Wextra -Werror -g -fno-omit-frame-pointer \
+            -fsanitize=address,undefined -fno-sanitize-recover=all -Isrc \
+            src/tlsa_resolver.c test/native/shim_test.c -lresolv -o build/shim_test
+          build/shim_test
+
+  osv:
+    # Known vulnerabilities in the resolved dependencies.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      # The library's pubspec.lock is not committed; resolve it as a user
+      # of the package would. flutter pub get also resolves example/.
+      - run: flutter pub get && (cd device_test && flutter pub get)
+      - uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            -L
+            pubspec.lock
+            -L
+            example/pubspec.lock
+            -L
+            device_test/pubspec.lock

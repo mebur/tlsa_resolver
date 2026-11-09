@@ -17,3 +17,10 @@
 * RSA keys limited to 512–4096 bits with exponents of at most 8 bytes;
   ECDSA keys must lie on the curve.
 * Duplicate records are removed from RRsets (RFC 2181 §5).
+* `TlsaResolver.inBackground` and `IsolateValidator` validate on a
+  long-lived background isolate, keeping signature checks off the UI
+  isolate. `TlsaResolver.validator` is now a `DnssecLookup`.
+* The zone key cache holds at most `maxCachedZones` zones (default 1000),
+  dropping the least recently used.
+* The native shim rejects invalid arguments, and is built with warnings and
+  stack protection, `_FORTIFY_SOURCE` and, in CI, sanitizers.

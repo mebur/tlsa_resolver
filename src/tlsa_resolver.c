@@ -2,6 +2,15 @@
 
 #include <string.h>
 
+// Rejects arguments the platform APIs would misread: negative sizes turn
+// into huge size_t values, and a negative poll() timeout waits forever.
+static int bad_arguments(const uint8_t *query, int32_t query_len,
+                         const uint8_t *answer, int32_t answer_cap,
+                         int32_t timeout_ms) {
+  return query == NULL || answer == NULL || query_len <= 0 ||
+         answer_cap <= 0 || timeout_ms <= 0;
+}
+
 #if defined(__ANDROID__)
 
 // Android 10 (API 29) added android_res_nsend, which hands a raw query to the
@@ -33,6 +42,9 @@ static void load_api(void) {
 int32_t tlsa_resolver_send(const uint8_t *query, int32_t query_len,
                            uint8_t *answer, int32_t answer_cap,
                            int32_t timeout_ms) {
+  if (bad_arguments(query, query_len, answer, answer_cap, timeout_ms)) {
+    return -TLSA_ERR_ARGUMENT;
+  }
   pthread_once(&load_once, load_api);
   if (!nsend || !nresult || !cancel) return -TLSA_ERR_UNSUPPORTED;
 
@@ -68,6 +80,9 @@ int32_t tlsa_resolver_send(const uint8_t *query, int32_t query_len,
 int32_t tlsa_resolver_send(const uint8_t *query, int32_t query_len,
                            uint8_t *answer, int32_t answer_cap,
                            int32_t timeout_ms) {
+  if (bad_arguments(query, query_len, answer, answer_cap, timeout_ms)) {
+    return -TLSA_ERR_ARGUMENT;
+  }
   struct __res_state state;
   memset(&state, 0, sizeof(state));
   if (res_ninit(&state) != 0) return -TLSA_ERR_INIT;

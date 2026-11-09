@@ -17,6 +17,20 @@ void main(List<String> args) async {
       libraries: [
         if (os == OS.macOS || os == OS.iOS || os == OS.linux) 'resolv',
       ],
+      // Warnings and the usual hardening for clang and gcc. Warnings are
+      // not errors here, so a newer compiler cannot break an app's build;
+      // CI builds the shim with -Werror and sanitizers instead.
+      flags: [
+        if (os != OS.windows) ...[
+          '-Wall',
+          '-Wextra',
+          '-Wformat=2',
+          '-fstack-protector-strong',
+        ],
+      ],
+      defines: {
+        if (os != OS.windows) '_FORTIFY_SOURCE': '2',
+      },
     );
     await cbuilder.run(
       input: input,

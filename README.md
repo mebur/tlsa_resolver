@@ -12,7 +12,9 @@ trust anchors down to the TLSA record.
 ```dart
 import 'package:tlsa_resolver/tlsa_resolver.dart';
 
-final resolver = TlsaResolver(); // reuse it: validated zone keys are cached
+// Reuse it: validated zone keys are cached. In a Flutter app, validate on
+// a background isolate so signature checks never stall the UI.
+final resolver = TlsaResolver.inBackground();
 
 final result = await resolver.lookup('mail.example.com', port: 25);
 
@@ -35,6 +37,12 @@ if (verdict.outcome == DaneOutcome.mismatch ||
   // reject
 }
 ```
+
+`TlsaResolver.inBackground()` runs the validator, its transport and its key
+cache on a long-lived background isolate (`IsolateValidator`); call
+`resolver.close()` when done, as the isolate keeps the program alive. Plain
+`TlsaResolver()` validates on the calling isolate, which suits command-line
+tools and servers.
 
 ## Platforms
 
@@ -100,6 +108,7 @@ final resolver = TlsaResolver(
     const NativeDnsTransport(),
     sha1: Sha1Policy.unsupported,
     maxQueries: 32,
+    maxCachedZones: 200,
     timeout: const Duration(seconds: 10),
   ),
 );
@@ -148,6 +157,23 @@ It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed
 in the tool with their reason; currently that is only Ed448 (algorithm 16),
 which this package does not support. CI runs it on every push and weekly.
+
+* Zone keys are cached for their TTL, for at most `maxCachedZones` zones
+  (default 1000); past that the least recently used zone is dropped.
+
+### Native code
+
+The C shim checks its arguments (null buffers, non-positive lengths and
+timeouts) before calling the platform API, and the build hook compiles it
+with `-Wall -Wextra -Wformat=2 -fstack-protector-strong -D_FORTIFY_SOURCE=2`
+for clang and gcc. CI also builds it with `-Werror`, `-Wconversion` and
+friends, and runs `test/native/shim_test.c` under AddressSanitizer and
+UndefinedBehaviorSanitizer on Linux and macOS:
+
+```sh
+mkdir -p build && cc -std=gnu11 -Wall -Wextra -Werror -g -fsanitize=address,undefined \
+  -Isrc src/tlsa_resolver.c test/native/shim_test.c -lresolv -o build/shim_test && build/shim_test
+```
 
 ### Crypto test vectors and fuzzing
 

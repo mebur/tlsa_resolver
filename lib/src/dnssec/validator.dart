@@ -7,6 +7,7 @@ import '../wire/name.dart';
 import '../wire/rdata.dart';
 import 'crypto.dart';
 import 'denial.dart';
+import 'isolate_validator.dart';
 import 'trust_anchors.dart';
 
 /// DNSSEC security status of an answer (RFC 4033 §5).
@@ -79,6 +80,16 @@ class ValidatedAnswer {
   bool get isSecure => status == SecurityStatus.secure;
 }
 
+/// Something that looks up and validates DNS data: a [DnssecValidator], or
+/// an [IsolateValidator] running one on a background isolate.
+abstract interface class DnssecLookup {
+  /// Looks up [type] at [name], following CNAMEs, and validates every step.
+  Future<ValidatedAnswer> resolve(DnsName name, int type);
+
+  /// Clears cached zone keys.
+  Future<void> clearCache();
+}
+
 /// A validating stub resolver: it asks a recursive resolver (through a
 /// [DnsTransport]) for data plus signatures and checks the whole chain of
 /// trust from the root trust anchors itself, following RFC 4033–4035,
@@ -86,7 +97,7 @@ class ValidatedAnswer {
 ///
 /// Each [resolve] is bounded by [maxQueries] and [timeout], so a hostile
 /// resolver cannot keep it busy with endless delegations or slow answers.
-class DnssecValidator {
+class DnssecValidator implements DnssecLookup {
   DnssecValidator(
     this.transport, {
     List<Ds>? trustAnchors,
@@ -95,10 +106,12 @@ class DnssecValidator {
     this.sha1 = Sha1Policy.accept,
     this.maxQueries = 64,
     this.maxSignatureChecks = 64,
+    this.maxCachedZones = 1000,
     this.timeout = const Duration(seconds: 20),
   })  : trustAnchors = trustAnchors ?? rootTrustAnchors,
         _clock = clock ?? DateTime.now {
     if (maxQueries < 1) throw ArgumentError.value(maxQueries, 'maxQueries');
+    if (maxCachedZones < 1) throw ArgumentError.value(maxCachedZones, 'maxCachedZones');
     if (maxSignatureChecks < 1) {
       throw ArgumentError.value(maxSignatureChecks, 'maxSignatureChecks');
     }
@@ -128,6 +141,11 @@ class DnssecValidator {
   /// Signatures tried per RRset before it counts as unverifiable.
   static const maxSignaturesPerRRset = 8;
 
+  /// Most zones whose keys (or proven unsigned status) are cached. Past it,
+  /// the least recently used zone is dropped, so lookups across many zones
+  /// cannot grow memory without bound.
+  final int maxCachedZones;
+
   /// Longest one [resolve] may take; after that it is
   /// [SecurityStatus.indeterminate].
   final Duration timeout;
@@ -142,15 +160,20 @@ class DnssecValidator {
       ? DigestType.supported
       : DigestType.supported.difference({DigestType.sha1});
 
+  /// Zone keys in least recently used order (oldest first).
   final _keyCache = <DnsName, _CachedKeys>{};
 
   int get _now => _clock().millisecondsSinceEpoch ~/ 1000;
 
-  /// Clears cached zone keys.
-  void clearCache() => _keyCache.clear();
+  @override
+  Future<void> clearCache() async => _keyCache.clear();
 
   /// Looks up [type] at [name], following CNAMEs, and validates every step.
   /// The overall status is the weakest of the steps.
+  ///
+  /// Signature checks run synchronously on the calling isolate. In a
+  /// Flutter app, use an [IsolateValidator] to keep them off the UI isolate.
+  @override
   Future<ValidatedAnswer> resolve(DnsName name, int type) {
     // The budget travels in a zone so every query of this lookup draws on
     // it. Zone keys fetched for one lookup and awaited by a concurrent one
@@ -487,13 +510,18 @@ class DnssecValidator {
   // Zone keys
 
   Future<_ZoneKeys> _keysFor(DnsName zone) {
-    final cached = _keyCache[zone];
+    final cached = _keyCache.remove(zone);
     if (cached != null && (cached.expires == null || cached.expires! > _now)) {
+      _keyCache[zone] = cached; // now the most recently used
       return cached.keys;
     }
     final future = _fetchKeys(zone);
     final entry = _CachedKeys(future);
     _keyCache[zone] = entry;
+    while (_keyCache.length > maxCachedZones) {
+      // A dropped fetch still completes for whoever awaits it.
+      _keyCache.remove(_keyCache.keys.first);
+    }
     future.then((keys) {
       // Keep secure and insecure results for their TTL; retry anything else.
       if (keys.ttl == null) {

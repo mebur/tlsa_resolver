@@ -278,6 +278,26 @@ void main() {
     expect(h.dns.queries.length - before, 1);
   });
 
+  test('the key cache drops the least recently used zone past maxCachedZones', () async {
+    const inExample = '_443._tcp.a.example.test.', inNsec3 = '_443._tcp.a.nsec3.test.';
+    h.dns.on(inExample, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(inExample)])));
+    h.dns.on(inNsec3, RRType.tlsa, FakeResponse(answers: h.nsec3.signed_([tlsa(inNsec3)])));
+    final resolver = TlsaResolver(validator: DnssecValidator(h.dns,
+        trustAnchors: [h.root.dsValue], clock: () => testNow, maxCachedZones: 3));
+    // Caches ., test. and example.test.
+    await resolver.lookupName(n(inExample));
+    // nsec3.test. needs a fourth slot: example.test., used least recently,
+    // goes. test. was just used again and stays.
+    var before = h.dns.queries.length;
+    await resolver.lookupName(n(inNsec3));
+    expect(h.dns.queries.length - before, 3); // TLSA, DS, DNSKEY of nsec3.test.
+    before = h.dns.queries.length;
+    final result = await resolver.lookupName(n(inExample));
+    expect(result.status, SecurityStatus.secure, reason: result.reason);
+    expect([for (final q in h.dns.queries.skip(before)) '${q.$1} ${RRType.name(q.$2)}'],
+        ['$inExample TLSA', 'example.test. DS', 'example.test. DNSKEY']);
+  });
+
   group('SHA-1 policy', () {
     const name = '_443._tcp.www.example.test.';
 

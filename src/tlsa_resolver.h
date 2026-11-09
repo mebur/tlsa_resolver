@@ -15,6 +15,7 @@
 #define TLSA_ERR_SEND 3         // The query could not be sent or no server answered.
 #define TLSA_ERR_TIMEOUT 4      // No answer within the timeout.
 #define TLSA_ERR_TRUNCATED 5    // The answer did not fit in the buffer.
+#define TLSA_ERR_ARGUMENT 6     // A null buffer, or a length or timeout that is not positive.
 
 // Sends a complete DNS query message (wire format, as built by the Dart side,
 // including the EDNS0 OPT record with the DO bit) to the operating system's

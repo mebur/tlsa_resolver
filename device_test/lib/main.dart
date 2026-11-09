@@ -37,13 +37,18 @@ class _SuitePageState extends State<SuitePage> {
       _results.clear();
     });
     // A fresh resolver per run, so every run validates the chain from the
-    // root with a cold cache.
-    final resolver = TlsaResolver(transport: _transport.create());
-    for (final c in testCases) {
-      setState(() => _running = c);
-      final result = await runCase(resolver, c);
-      if (!mounted) return;
-      setState(() => _results[c] = result);
+    // root with a cold cache. Validation runs on a background isolate, as
+    // it should in an app.
+    final resolver = TlsaResolver.inBackground(transport: _transport.create());
+    try {
+      for (final c in testCases) {
+        setState(() => _running = c);
+        final result = await runCase(resolver, c);
+        if (!mounted) return;
+        setState(() => _results[c] = result);
+      }
+    } finally {
+      await resolver.close();
     }
     setState(() {
       _running = null;
@@ -185,11 +190,19 @@ class CustomLookupPage extends StatefulWidget {
 }
 
 class _CustomLookupPageState extends State<CustomLookupPage> {
-  late final _resolver = TlsaResolver(transport: widget.transport.create());
+  late final _resolver = TlsaResolver.inBackground(transport: widget.transport.create());
   final _host = TextEditingController(text: 'www.freebsd.org');
   final _port = TextEditingController(text: '443');
   CaseResult? _result;
   bool _busy = false;
+
+  @override
+  void dispose() {
+    _resolver.close();
+    _host.dispose();
+    _port.dispose();
+    super.dispose();
+  }
 
   Future<void> _lookup() async {
     final port = int.tryParse(_port.text.trim());

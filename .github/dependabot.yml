@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: pub
+    directories: [/, /example, /device_test]
+    schedule:
+      interval: weekly
+    groups:
+      pub:
+        patterns: ['*']
