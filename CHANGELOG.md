@@ -24,3 +24,7 @@
   dropping the least recently used.
 * The native shim rejects invalid arguments, and is built with warnings and
   stack protection, `_FORTIFY_SOURCE` and, in CI, sanitizers.
+* A root key set that matches no trust anchor is reported as likely stale
+  anchors, with the key tags involved.
+* `lookup` uses the CNAME-expanded host name as TLSA base domain first when
+  the chain is secure (RFC 7671 §7); `followCname: false` turns this off.

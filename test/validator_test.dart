@@ -22,7 +22,7 @@ void main() {
     test('signed TLSA is secure', () async {
       const name = '_443._tcp.www.example.test.';
       h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
-      final result = await h.resolver().lookup('www.example.test', port: 443);
+      final result = await h.resolver().lookup('www.example.test', port: 443, followCname: false);
       expect(result.status, SecurityStatus.secure, reason: result.reason);
       expect(result.daneApplies, isTrue);
       expect(result.records.single.toString(), startsWith('3 1 1 000102'));
@@ -272,6 +272,79 @@ void main() {
     });
   });
 
+  group('TLSA base domain (RFC 7671 §7)', () {
+    const alias = 'alias.example.test.', target = 'host.example.test.';
+    const atAlias = '_443._tcp.alias.example.test.', atTarget = '_443._tcp.host.example.test.';
+    final address = [192, 0, 2, 1];
+
+    void aliasTo(String to) => h.dns.on(alias, RRType.a,
+        FakeResponse(answers: h.example.signed_([rr(n(alias), RRType.cname, n(to).toWire())])));
+
+    setUp(() {
+      aliasTo(target);
+      h.dns.on(target, RRType.a, FakeResponse(answers: h.example.signed_([rr(n(target), RRType.a, address)])));
+      h.dns.on(atAlias, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(atAlias)])));
+    });
+
+    test('a secure alias is looked up at its target first', () async {
+      h.dns.on(atTarget, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsaRecord(atTarget, 3, 1, 1, List.filled(32, 9))])));
+      final result = await h.resolver().lookup('alias.example.test', port: 443);
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+      expect(result.answer.name, n(atTarget));
+      expect(result.records.single.toString(), endsWith('0909'));
+    });
+
+    test('with no TLSA at the target, the alias itself is used', () async {
+      h.dns.on(atTarget, RRType.tlsa, FakeResponse(authority: [
+        ...h.example.signed_([h.example.soa]),
+        ...h.example.signed_([h.example.nsec(atTarget, 'a.$atTarget', {RRType.txt})]),
+      ]));
+      final result = await h.resolver().lookup('alias.example.test', port: 443);
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+      expect(result.answer.name, n(atAlias));
+      expect(result.daneApplies, isTrue);
+    });
+
+    test('a bogus TLSA RRset at the target is not skipped', () async {
+      h.dns.on(atTarget, RRType.tlsa, FakeResponse(answers: [
+        tlsa(atTarget), Zone('example.test.').sign([tlsa(atTarget)]),
+      ]));
+      final result = await h.resolver().lookup('alias.example.test', port: 443);
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.answer.name, n(atTarget));
+    });
+
+    test('an alias into an unsigned zone uses the alias only', () async {
+      const unsignedTarget = 'host.unsigned.test.';
+      aliasTo(unsignedTarget);
+      h.dns.on(unsignedTarget, RRType.a, FakeResponse(answers: [rr(n(unsignedTarget), RRType.a, address)]));
+      h.dns.on(unsignedTarget, RRType.soa, FakeResponse(authority: [h.unsigned.soa]));
+      final result = await h.resolver().lookup('alias.example.test', port: 443);
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+      expect(result.answer.name, n(atAlias));
+      expect(h.dns.queries.any((q) => q.$1 == n('_443._tcp.host.unsigned.test.')), isFalse);
+    });
+
+    test('a bogus address lookup is a failure, not a fallback', () async {
+      h.dns.on(alias, RRType.a, FakeResponse(answers: [
+        rr(n(alias), RRType.cname, n(target).toWire()),
+        Zone('example.test.').sign([rr(n(alias), RRType.cname, n(target).toWire())]),
+      ]));
+      final result = await h.resolver().lookup('alias.example.test', port: 443);
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, startsWith('Address lookup for alias.example.test. failed'));
+      expect(result.isFailure, isTrue);
+    });
+
+    test('a host that is not an alias is looked up directly', () async {
+      h.dns.on(target, RRType.tlsa, FakeResponse());
+      h.dns.on(atTarget, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(atTarget)])));
+      final result = await h.resolver().lookup('host.example.test', port: 443);
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+      expect(result.answer.name, n(atTarget));
+    });
+  });
+
   test('transport failure is indeterminate', () async {
     final result = await h.resolver().lookupName(n('_443._tcp.nothing.example.test.'));
     expect(result.status, SecurityStatus.indeterminate);
@@ -284,9 +357,9 @@ void main() {
       h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
     }
     final resolver = h.resolver();
-    await resolver.lookup('a.example.test', port: 443);
+    await resolver.lookup('a.example.test', port: 443, followCname: false);
     final before = h.dns.queries.length;
-    await resolver.lookup('b.example.test', port: 443);
+    await resolver.lookup('b.example.test', port: 443, followCname: false);
     expect(h.dns.queries.length - before, 1);
   });
 

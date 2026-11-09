@@ -114,6 +114,16 @@ final resolver = TlsaResolver(
 );
 ```
 
+## Where TLSA records are looked up
+
+`lookup(host, port: …)` follows RFC 7671 §7. When `host` is an alias whose
+CNAME chain validates, the records are looked up at the chain's final target
+first and at `host` only if the target has none; with an insecure chain,
+`host` alone is used. `result.answer.name` says which name answered. A bogus
+or unanswered address lookup is returned as a failure rather than a
+fallback. `followCname: false` skips the address lookup, and `lookupName`
+takes an explicit owner name such as `_25._tcp.mail.example.com`.
+
 ## DANE matching
 
 `DaneVerifier.verify` follows RFC 7671:

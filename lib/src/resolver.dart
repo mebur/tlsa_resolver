@@ -40,12 +40,39 @@ class TlsaResolver {
     if (v is IsolateValidator) await v.close();
   }
 
-  /// Looks up the TLSA records for a service at `_port._protocol.host`
-  /// (RFC 6698 §3).
-  Future<TlsaResult> lookup(String host, {required int port, String protocol = 'tcp'}) {
+  /// Looks up the TLSA records for a service on [host], at
+  /// `_port._protocol.host` (RFC 6698 §3).
+  ///
+  /// When [host] is an alias, RFC 7671 §7 applies. If its CNAME chain
+  /// validates as secure, the records are looked up at the chain's final
+  /// target first and, only if there are none there, at [host] itself. If
+  /// the chain is insecure, [host] alone is used. `result.answer.name`
+  /// says where the records came from. This costs one address lookup
+  /// first; [followCname] false skips it and uses [host] only.
+  ///
+  /// A bogus or unanswered address lookup is returned as a failure: the
+  /// client cannot know where it would connect, and falling back to [host]
+  /// would let an attacker steer around DANE.
+  Future<TlsaResult> lookup(String host,
+      {required int port, String protocol = 'tcp', bool followCname = true}) async {
     if (port < 0 || port > 65535) throw ArgumentError.value(port, 'port');
-    final name = DnsName.parse(host).prependString('_$protocol').prependString('_$port');
-    return lookupName(name);
+    final hostName = DnsName.parse(host);
+    DnsName owner(DnsName base) => base.prependString('_$protocol').prependString('_$port');
+    if (!followCname) return lookupName(owner(hostName));
+
+    final address = await validator.resolve(hostName, RRType.a);
+    if (address.status == SecurityStatus.bogus || address.status == SecurityStatus.indeterminate) {
+      return TlsaResult(ValidatedAnswer(
+          name: owner(hostName), type: RRType.tlsa, status: address.status,
+          reason: 'Address lookup for $hostName failed: ${address.reason}'));
+    }
+    if (address.status == SecurityStatus.secure && address.aliases.isNotEmpty) {
+      final expanded = await lookupName(owner(address.canonicalName));
+      if (expanded.isFailure || (expanded.isSecure && expanded.records.isNotEmpty)) {
+        return expanded;
+      }
+    }
+    return lookupName(owner(hostName));
   }
 
   /// Looks up TLSA records at an explicit owner name such as
