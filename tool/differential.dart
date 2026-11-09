@@ -314,6 +314,7 @@ enum _Verdict {
   agree('agree', fails: false),
   known('known difference', fails: false),
   noAnswer('one side got no answer', fails: false),
+  diverged('different CNAME targets', fails: false),
   security('SECURE ON ONE SIDE ONLY', fails: true),
   status('different status', fails: true),
   data('same status, different data', fails: true);
@@ -339,6 +340,14 @@ class _Comparison {
   String? get note => _judged.$2;
 
   (_Verdict, String?) _judge() {
+    // CDN traffic steering hands out different CNAME targets by location
+    // and time (www.paypal.com goes to a signed or an unsigned CDN), so
+    // the two sides may have looked up different chains.
+    if (ours.canonicalName != null &&
+        unbound.canonicalName != null &&
+        ours.canonicalName != unbound.canonicalName) {
+      return (_Verdict.diverged, 'statuses cannot be compared');
+    }
     if (ours.status == unbound.status) {
       // Unauthenticated data may differ between the servers each side
       // reached (zones served by several providers), so only secure
