@@ -33,3 +33,7 @@
   rather than fragmented.
 * `DohTransport`: DNS over HTTPS (RFC 8484), with presets for Cloudflare
   and Google. Servers must accept HTTP/1.1.
+* `ValidatedAnswer.error` / `TlsaResult.error`: a `ValidationError` with the
+  closest Extended DNS Error code (RFC 8914) for every non-secure answer
+  that is a failure, alongside the `reason` text. Expired and not yet valid
+  signatures, and NSEC3 opt-out and iteration limits, are told apart.

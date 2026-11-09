@@ -125,6 +125,21 @@ final resolver = TlsaResolver(
 );
 ```
 
+## Why an answer is not secure
+
+`result.reason` explains a non-secure answer in words; `result.error` gives a
+`ValidationError` for programs to act on (`signatureExpired`,
+`signatureNotYetValid`, `dnskeyMissing`, `rrsigsMissing`, `nsecMissing`,
+`networkError`, ...). Each carries `edeCode`, the closest Extended DNS Error
+code (RFC 8914). Plainly unsigned zones and NSEC3 opt-out are insecure
+without an error.
+
+```dart
+if (result.error == ValidationError.signatureNotYetValid) {
+  // Probably the device clock: tell the user rather than blame the server.
+}
+```
+
 ## Where TLSA records are looked up
 
 `lookup(host, port: …)` follows RFC 7671 §7. When `host` is an alias whose

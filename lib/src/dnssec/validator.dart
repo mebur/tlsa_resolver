@@ -44,6 +44,66 @@ enum Sha1Policy {
   reject,
 }
 
+/// Why an answer is not secure, for programs to act on. Each value carries
+/// the closest Extended DNS Error code (RFC 8914), so it can be logged or
+/// passed on in those terms. The [ValidatedAnswer.reason] text says more.
+enum ValidationError {
+  /// The zone is signed only with algorithms or DS digests that are not
+  /// supported or are disabled (see [Sha1Policy]). Insecure, or bogus under
+  /// [Sha1Policy.reject].
+  unsupportedAlgorithm(1),
+
+  /// Other DNSSEC failures: signatures that do not verify, a signer that
+  /// is not an ancestor, a zone that the parent says does not exist.
+  bogus(6),
+
+  /// The only signatures have expired.
+  signatureExpired(7),
+
+  /// The only signatures are not valid yet; often a wrong device clock.
+  signatureNotYetValid(8),
+
+  /// No DNSKEY matches the parent's DS records or the trust anchors.
+  dnskeyMissing(9),
+
+  /// Data in a signed zone came without signatures.
+  rrsigsMissing(10),
+
+  /// A denial of existence or wildcard answer came without a valid
+  /// NSEC/NSEC3 proof.
+  nsecMissing(12),
+
+  /// The resolver answered with an error (SERVFAIL, REFUSED, ...), or the
+  /// zone of a name could not be found.
+  resolverError(22),
+
+  /// No answer arrived: the transport failed or timed out.
+  networkError(23),
+
+  /// Malformed, mismatched or contradictory responses: a response that does
+  /// not match the query, several CNAMEs at a name, CNAME loops.
+  invalidData(24),
+
+  /// The zone uses more NSEC3 iterations than are validated (RFC 9276), so
+  /// its denials are insecure.
+  unsupportedNsec3Iterations(27),
+
+  /// The lookup used up its query, signature check, alias or time budget.
+  /// There is no Extended DNS Error code for this; 0 is "Other".
+  limitExceeded(0);
+
+  const ValidationError(this.edeCode);
+
+  /// The Extended DNS Error INFO-CODE (RFC 8914 §4) closest to this error.
+  final int edeCode;
+}
+
+/// A reason an answer is not secure: the code, if it is a failure (plain
+/// unsigned zones and NSEC3 opt-out have none), and the text.
+typedef _Why = ({ValidationError? error, String text});
+
+_Why _why(ValidationError? error, String text) => (error: error, text: text);
+
 /// The validated outcome of looking up one name and type.
 class ValidatedAnswer {
   ValidatedAnswer({
@@ -53,6 +113,7 @@ class ValidatedAnswer {
     this.records = const [],
     this.nxDomain = false,
     this.reason,
+    this.error,
     this.aliases = const [],
   });
 
@@ -68,8 +129,12 @@ class ValidatedAnswer {
   /// Whether the final name does not exist.
   final bool nxDomain;
 
-  /// Why the answer is not [SecurityStatus.secure].
+  /// Why the answer is not [SecurityStatus.secure], in words.
   final String? reason;
+
+  /// Why the answer is not [SecurityStatus.secure], as a code. Null for
+  /// secure answers and for plainly unsigned zones.
+  final ValidationError? error;
 
   /// CNAME targets followed from [name], in order.
   final List<DnsName> aliases;
@@ -185,14 +250,15 @@ class DnssecValidator implements DnssecLookup {
       if (budget.checksExhausted) {
         return ValidatedAnswer(
             name: name, type: type, status: SecurityStatus.indeterminate,
-            reason: budget.checksReason, aliases: answer.aliases);
+            reason: budget.checksReason, error: ValidationError.limitExceeded,
+            aliases: answer.aliases);
       }
       return answer;
     }).timeout(timeout, onTimeout: () {
       budget.expire();
       return ValidatedAnswer(
           name: name, type: type, status: SecurityStatus.indeterminate,
-          reason: budget.timeoutReason);
+          reason: budget.timeoutReason, error: ValidationError.limitExceeded);
     });
   }
 
@@ -200,12 +266,12 @@ class DnssecValidator implements DnssecLookup {
     final aliases = <DnsName>[];
     var current = name;
     var status = SecurityStatus.secure;
-    String? reason;
+    _Why? why;
     while (true) {
       final step = await _resolveStep(current, type);
       if (_rank(step.status) > _rank(status)) {
         status = step.status;
-        reason = step.reason;
+        why = step.why;
       }
       if (step.status == SecurityStatus.bogus ||
           step.status == SecurityStatus.indeterminate ||
@@ -216,7 +282,8 @@ class DnssecValidator implements DnssecLookup {
           status: status,
           records: step.records,
           nxDomain: step.nxDomain,
-          reason: reason,
+          reason: why?.text,
+          error: why?.error,
           aliases: aliases,
         );
       }
@@ -224,13 +291,15 @@ class DnssecValidator implements DnssecLookup {
       if (aliases.contains(current) || current == name) {
         return ValidatedAnswer(
             name: name, type: type, status: SecurityStatus.bogus,
-            reason: 'CNAME loop at $current', aliases: aliases);
+            reason: 'CNAME loop at $current', error: ValidationError.invalidData,
+            aliases: aliases);
       }
       aliases.add(current);
       if (aliases.length > maxAliases) {
         return ValidatedAnswer(
             name: name, type: type, status: SecurityStatus.indeterminate,
-            reason: 'More than $maxAliases CNAMEs', aliases: aliases);
+            reason: 'More than $maxAliases CNAMEs', error: ValidationError.limitExceeded,
+            aliases: aliases);
       }
     }
   }
@@ -245,38 +314,45 @@ class DnssecValidator implements DnssecLookup {
   // ---------------------------------------------------------------------
   // Transport
 
-  Future<(DnsMessage?, String?)> _query(DnsName name, int type) async {
+  Future<(DnsMessage?, _Why?)> _query(DnsName name, int type) async {
     final query = DnsMessage.buildQuery(name, type);
     final budget = Zone.current[_Budget] as _Budget?;
     if (budget != null) {
       final refusal = budget.take();
-      if (refusal != null) return (null, refusal);
+      if (refusal != null) return (null, _why(ValidationError.limitExceeded, refusal));
     }
     try {
       var response = transport.send(query);
       if (budget != null) {
-        response = response.timeout(budget.remaining,
-            onTimeout: () => throw DnsTransportException(budget.timeoutReason));
+        response = response.timeout(budget.remaining, onTimeout: () => throw _OutOfTime());
       }
       final bytes = await response;
       final msg = DnsMessage.parse(bytes);
       if (!msg.isResponse || msg.id != DnsMessage.queryId(query)) {
-        return (null, 'Response does not match query for $name');
+        return (null, _why(ValidationError.invalidData, 'Response does not match query for $name'));
       }
       if (msg.questions.length != 1 ||
           msg.questions.first.name != name ||
           msg.questions.first.type != type) {
-        return (null, 'Response question does not match $name');
+        return (null, _why(ValidationError.invalidData, 'Response question does not match $name'));
       }
-      if (msg.truncated) return (null, 'Truncated response for $name');
+      if (msg.truncated) {
+        return (null, _why(ValidationError.invalidData, 'Truncated response for $name'));
+      }
       if (msg.rcode != Rcode.noError && msg.rcode != Rcode.nxDomain) {
-        return (null, 'Resolver returned rcode ${msg.rcode} for $name ${RRType.name(type)}');
+        return (
+          null,
+          _why(ValidationError.resolverError,
+              'Resolver returned rcode ${msg.rcode} for $name ${RRType.name(type)}')
+        );
       }
       return (msg, null);
+    } on _OutOfTime {
+      return (null, _why(ValidationError.limitExceeded, budget!.timeoutReason));
     } on DnsTransportException catch (e) {
-      return (null, e.message);
+      return (null, _why(ValidationError.networkError, e.message));
     } on FormatException catch (e) {
-      return (null, 'Malformed response for $name: ${e.message}');
+      return (null, _why(ValidationError.invalidData, 'Malformed response for $name: ${e.message}'));
     }
   }
 
@@ -310,27 +386,28 @@ class DnssecValidator implements DnssecLookup {
 
   Future<_Step> _resolveStep(DnsName name, int type) async {
     final (msg, error) = await _query(name, type);
-    if (msg == null) return _Step(SecurityStatus.indeterminate, reason: error);
+    if (msg == null) return _Step(SecurityStatus.indeterminate, why: error);
 
     final answers = _rrset(msg.answers, name, type);
     if (answers.isNotEmpty) {
-      final (status, reason) = await _validatePositive(
+      final (status, why) = await _validatePositive(
           name, type, answers, _sigs(msg.answers, name, type), msg);
-      return _Step(status, records: answers, reason: reason);
+      return _Step(status, records: answers, why: why);
     }
 
     if (type != RRType.cname) {
       final cnames = _rrset(msg.answers, name, RRType.cname);
       if (cnames.isNotEmpty) {
         if (cnames.length != 1) {
-          return _Step(SecurityStatus.bogus, reason: 'Multiple CNAMEs at $name');
+          return _Step(SecurityStatus.bogus,
+              why: _why(ValidationError.invalidData, 'Multiple CNAMEs at $name'));
         }
         final target = readRdataName(cnames.first.rdata, 0).$1;
         final sigs = _sigs(msg.answers, name, RRType.cname);
-        final (status, reason) = sigs.isEmpty
+        final (status, why) = sigs.isEmpty
             ? await _validateDnameSynthesis(name, target, msg)
             : await _validatePositive(name, RRType.cname, cnames, sigs, msg);
-        return _Step(status, cnameTarget: target, reason: reason);
+        return _Step(status, cnameTarget: target, why: why);
       }
     }
 
@@ -339,7 +416,7 @@ class DnssecValidator implements DnssecLookup {
 
   /// A CNAME synthesised from a DNAME is unsigned; it is trusted when a
   /// validated DNAME produces exactly that target (RFC 6672 §5.3.1).
-  Future<(SecurityStatus, String?)> _validateDnameSynthesis(
+  Future<(SecurityStatus, _Why?)> _validateDnameSynthesis(
       DnsName name, DnsName target, DnsMessage msg) async {
     for (final rr in msg.answers) {
       if (rr.type != RRType.dname || !name.isStrictSubdomainOf(rr.name)) continue;
@@ -359,7 +436,7 @@ class DnssecValidator implements DnssecLookup {
     return _unsignedStatus(name, RRType.cname);
   }
 
-  Future<(SecurityStatus, String?)> _validatePositive(DnsName owner, int type,
+  Future<(SecurityStatus, _Why?)> _validatePositive(DnsName owner, int type,
       List<ResourceRecord> rrset, List<Rrsig> sigs, DnsMessage msg) async {
     if (sigs.isEmpty) return _unsignedStatus(owner, type);
 
@@ -370,16 +447,17 @@ class DnssecValidator implements DnssecLookup {
           s.signer,
     };
     if (signers.isEmpty) {
-      return (SecurityStatus.bogus, 'RRSIG signer for $owner is not an ancestor');
+      return (SecurityStatus.bogus,
+          _why(ValidationError.bogus, 'RRSIG signer for $owner is not an ancestor'));
     }
 
-    String? failure;
+    _Why? failure;
     for (final signer in signers) {
       final keys = await _keysFor(signer);
-      if (keys.status != SecurityStatus.secure) return (keys.status, keys.reason);
+      if (keys.status != SecurityStatus.secure) return (keys.status, keys.why);
       final sig = _verifyRRset(rrset, sigs, signer, keys.keys);
       if (sig == null) {
-        failure = 'No valid signature for $owner ${RRType.name(type)}';
+        failure = _unverified(sigs, signer, type, 'No valid signature for $owner ${RRType.name(type)}');
         continue;
       }
       if (sig.labels < owner.rrsigLabelCount) {
@@ -388,11 +466,17 @@ class DnssecValidator implements DnssecLookup {
               ? nsecProveWildcardExpansion(owner, nsecs)
               : prover.proveWildcardExpansion(owner, sig.labels);
         });
-        if (proof == Proof.failed) {
-          return (SecurityStatus.bogus, 'Wildcard answer for $owner lacks a proof that the name does not exist');
-        }
-        if (proof == Proof.insecure) {
-          return (SecurityStatus.insecure, 'NSEC3 proof for $owner is insecure');
+        switch (proof) {
+          case Proof.failed:
+            return (SecurityStatus.bogus, _why(ValidationError.nsecMissing,
+                'Wildcard answer for $owner lacks a proof that the name does not exist'));
+          case Proof.optOut:
+            return (SecurityStatus.insecure, _why(null, 'Wildcard proof for $owner relies on NSEC3 opt-out'));
+          case Proof.tooManyIterations:
+            return (SecurityStatus.insecure, _why(ValidationError.unsupportedNsec3Iterations,
+                'Wildcard proof for $owner uses more than $maxNsec3Iterations NSEC3 iterations'));
+          case Proof.proven:
+            break;
         }
       }
       return (SecurityStatus.secure, null);
@@ -413,17 +497,18 @@ class DnssecValidator implements DnssecLookup {
     }
     final soaSigs = soa == null ? <Rrsig>[] : _sigs(msg.authority, soa.name, RRType.soa);
     if (soa == null || soaSigs.isEmpty) {
-      final (status, reason) = await _unsignedStatus(name, type);
-      return _Step(status, nxDomain: nx, reason: reason);
+      final (status, why) = await _unsignedStatus(name, type);
+      return _Step(status, nxDomain: nx, why: why);
     }
 
     final zone = soa.name;
     final keys = await _keysFor(zone);
     if (keys.status != SecurityStatus.secure) {
-      return _Step(keys.status, nxDomain: nx, reason: keys.reason);
+      return _Step(keys.status, nxDomain: nx, why: keys.why);
     }
     if (_verifyRRset(_rrset(msg.authority, zone, RRType.soa), soaSigs, zone, keys.keys) == null) {
-      return _Step(SecurityStatus.bogus, nxDomain: nx, reason: 'Invalid SOA signature for $zone');
+      return _Step(SecurityStatus.bogus, nxDomain: nx,
+          why: _unverified(soaSigs, zone, RRType.soa, 'Invalid SOA signature for $zone'));
     }
 
     final proof = await _denialProof(msg, zone, keys.keys, (nsecs, prover) {
@@ -436,10 +521,14 @@ class DnssecValidator implements DnssecLookup {
     });
     return switch (proof) {
       Proof.proven => _Step(SecurityStatus.secure, nxDomain: nx),
-      Proof.insecure => _Step(SecurityStatus.insecure, nxDomain: nx,
-          reason: 'Denial for $name relies on NSEC3 opt-out or excessive iterations'),
+      Proof.optOut => _Step(SecurityStatus.insecure, nxDomain: nx,
+          why: _why(null, 'Denial for $name relies on NSEC3 opt-out')),
+      Proof.tooManyIterations => _Step(SecurityStatus.insecure, nxDomain: nx,
+          why: _why(ValidationError.unsupportedNsec3Iterations,
+              'Denial for $name uses more than $maxNsec3Iterations NSEC3 iterations')),
       Proof.failed => _Step(SecurityStatus.bogus, nxDomain: nx,
-          reason: 'No valid proof that $name ${RRType.name(type)} does not exist'),
+          why: _why(ValidationError.nsecMissing,
+              'No valid proof that $name ${RRType.name(type)} does not exist')),
     };
   }
 
@@ -473,18 +562,19 @@ class DnssecValidator implements DnssecLookup {
 
   /// Status of data that arrived without signatures: insecure if its zone
   /// is provably unsigned, otherwise bogus.
-  Future<(SecurityStatus, String?)> _unsignedStatus(DnsName name, int type) async {
+  Future<(SecurityStatus, _Why?)> _unsignedStatus(DnsName name, int type) async {
     // A DS RRset lives in the parent zone.
     final zone = await _findZone(type == RRType.ds ? name.parent : name);
     if (zone == null) {
-      return (SecurityStatus.indeterminate, 'Could not find the zone of $name');
+      return (SecurityStatus.indeterminate,
+          _why(ValidationError.resolverError, 'Could not find the zone of $name'));
     }
     final keys = await _keysFor(zone);
     return switch (keys.status) {
-      SecurityStatus.insecure => (SecurityStatus.insecure, keys.reason),
-      SecurityStatus.secure => (SecurityStatus.bogus,
-          'Missing signatures for $name ${RRType.name(type)} in signed zone $zone'),
-      _ => (keys.status, keys.reason),
+      SecurityStatus.insecure => (SecurityStatus.insecure, keys.why),
+      SecurityStatus.secure => (SecurityStatus.bogus, _why(ValidationError.rrsigsMissing,
+          'Missing signatures for $name ${RRType.name(type)} in signed zone $zone')),
+      _ => (keys.status, keys.why),
     };
   }
 
@@ -539,7 +629,8 @@ class DnssecValidator implements DnssecLookup {
     // and another lookup may be awaiting the same keys.
     final budget = Zone.current[_Budget] as _Budget?;
     if (budget != null && budget.checksExhausted && keys.status != SecurityStatus.secure) {
-      return _ZoneKeys.fail(SecurityStatus.indeterminate, budget.checksReason);
+      return _ZoneKeys.fail(
+          SecurityStatus.indeterminate, _why(ValidationError.limitExceeded, budget.checksReason));
     }
     return keys;
   }
@@ -551,19 +642,19 @@ class DnssecValidator implements DnssecLookup {
     } else {
       final ds = await _resolveStep(zone, RRType.ds);
       if (ds.cnameTarget != null) {
-        return _ZoneKeys.fail(SecurityStatus.bogus, 'CNAME at zone cut $zone');
+        return _ZoneKeys.fail(SecurityStatus.bogus, _why(ValidationError.invalidData, 'CNAME at zone cut $zone'));
       }
       if (ds.nxDomain && ds.status != SecurityStatus.insecure) {
         // A signer or SOA owner that does not exist is a forgery.
-        return _ZoneKeys.fail(SecurityStatus.bogus, 'Zone $zone does not exist');
+        return _ZoneKeys.fail(SecurityStatus.bogus, _why(ValidationError.bogus, 'Zone $zone does not exist'));
       }
       if (ds.status == SecurityStatus.insecure ||
           (ds.status == SecurityStatus.secure && ds.records.isEmpty)) {
-        return _ZoneKeys.insecure(ds.reason ?? 'No DS for $zone: unsigned delegation',
+        return _ZoneKeys.insecure(ds.why ?? _why(null, 'No DS for $zone: unsigned delegation'),
             _ttl(ds.records));
       }
       if (ds.status != SecurityStatus.secure) {
-        return _ZoneKeys.fail(ds.status, ds.reason);
+        return _ZoneKeys.fail(ds.status, ds.why);
       }
       dsSet = [];
       for (final rr in ds.records) {
@@ -589,9 +680,10 @@ class DnssecValidator implements DnssecLookup {
     ];
     if (usable.isEmpty) {
       if (known.isEmpty) {
-        return _ZoneKeys.insecure('No supported DS algorithm for $zone', 3600);
+        return _ZoneKeys.insecure(
+            _why(ValidationError.unsupportedAlgorithm, 'No supported DS algorithm for $zone'), 3600);
       }
-      final reason = 'Zone $zone can only be validated with SHA-1';
+      final reason = _why(ValidationError.unsupportedAlgorithm, 'Zone $zone can only be validated with SHA-1');
       return sha1 == Sha1Policy.reject
           ? _ZoneKeys.fail(SecurityStatus.bogus, reason)
           : _ZoneKeys.insecure(reason, 3600);
@@ -619,12 +711,13 @@ class DnssecValidator implements DnssecLookup {
         if (usable.any((ds) => dsMatchesKey(ds, key, zone))) key,
     ];
     if (anchored.isEmpty) {
-      return _ZoneKeys.fail(SecurityStatus.bogus,
-          zone.isRoot ? _rootMismatch(keys) : 'No DNSKEY of $zone matches its DS');
+      return _ZoneKeys.fail(SecurityStatus.bogus, _why(ValidationError.dnskeyMissing,
+          zone.isRoot ? _rootMismatch(keys) : 'No DNSKEY of $zone matches its DS'));
     }
     final sigs = _sigs(msg.answers, zone, RRType.dnskey);
     if (_verifyRRset(rrset, sigs, zone, anchored) == null) {
-      return _ZoneKeys.fail(SecurityStatus.bogus, 'DNSKEY set of $zone is not signed by a key its DS vouches for');
+      return _ZoneKeys.fail(SecurityStatus.bogus, _unverified(sigs, zone, RRType.dnskey,
+          'DNSKEY set of $zone is not signed by a key its DS vouches for'));
     }
     return _ZoneKeys.secure(keys, _ttl(rrset));
   }
@@ -655,6 +748,20 @@ class DnssecValidator implements DnssecLookup {
 
   // ---------------------------------------------------------------------
   // Signatures
+
+  /// Why no signature by [signer] verified an RRset of [type]: none were
+  /// there, all were outside their validity period, or they did not verify.
+  _Why _unverified(List<Rrsig> sigs, DnsName signer, int type, String text) {
+    final relevant = [for (final s in sigs) if (s.signer == signer && s.typeCovered == type) s];
+    if (relevant.isEmpty) return _why(ValidationError.rrsigsMissing, '$text: no signatures by $signer');
+    final now = _now;
+    if (relevant.every((s) => !s.isValidAt(now))) {
+      return relevant.any((s) => s.isExpiredAt(now))
+          ? _why(ValidationError.signatureExpired, '$text: signatures expired')
+          : _why(ValidationError.signatureNotYetValid, '$text: signatures not valid yet (check the clock)');
+    }
+    return _why(ValidationError.bogus, text);
+  }
 
   /// Returns the first of [sigs] that verifies [rrset] with one of [keys]
   /// of [zone], or null.
@@ -757,30 +864,33 @@ class _Budget {
   }
 }
 
+/// Thrown inside [DnssecValidator._query] when the lookup's time is up.
+class _OutOfTime implements Exception {}
+
 class _Step {
-  _Step(this.status, {this.records = const [], this.nxDomain = false, this.cnameTarget, this.reason});
+  _Step(this.status, {this.records = const [], this.nxDomain = false, this.cnameTarget, this.why});
 
   final SecurityStatus status;
   final List<ResourceRecord> records;
   final bool nxDomain;
   final DnsName? cnameTarget;
-  final String? reason;
+  final _Why? why;
 }
 
 class _ZoneKeys {
   _ZoneKeys.secure(this.keys, this.ttl)
       : status = SecurityStatus.secure,
-        reason = null;
-  _ZoneKeys.insecure(this.reason, this.ttl)
+        why = null;
+  _ZoneKeys.insecure(this.why, this.ttl)
       : status = SecurityStatus.insecure,
         keys = const [];
-  _ZoneKeys.fail(this.status, this.reason)
+  _ZoneKeys.fail(this.status, this.why)
       : keys = const [],
         ttl = null;
 
   final SecurityStatus status;
   final List<Dnskey> keys;
-  final String? reason;
+  final _Why? why;
 
   /// Seconds to cache this result, or null to not cache it.
   final int? ttl;

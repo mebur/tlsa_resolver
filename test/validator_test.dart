@@ -345,6 +345,132 @@ void main() {
     });
   });
 
+  group('error codes (RFC 8914)', () {
+    const name = '_443._tcp.www.example.test.';
+
+    Future<TlsaResult> lookup([DnssecValidator? v]) =>
+        TlsaResolver(validator: v ?? h.validator()).lookupName(n(name));
+
+    test('secure answers have none', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+      expect((await lookup()).error, isNull);
+    });
+
+    test('a signature that does not verify is bogus (6)', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+        tlsaRecord(name, 3, 1, 1, List.filled(32, 0xee)), h.example.sign([tlsa(name)]),
+      ]));
+      final result = await lookup();
+      expect(result.error, ValidationError.bogus);
+      expect(result.error!.edeCode, 6);
+    });
+
+    test('expired signatures are signatureExpired (7)', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: -100, expirationOffset: -10),
+      ]));
+      final result = await lookup();
+      expect(result.error, ValidationError.signatureExpired);
+      expect(result.reason, contains('signatures expired'));
+    });
+
+    test('signatures from the future are signatureNotYetValid (8)', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: 3600, expirationOffset: 7200),
+      ]));
+      final result = await lookup();
+      expect(result.error, ValidationError.signatureNotYetValid);
+      expect(result.reason, contains('check the clock'));
+    });
+
+    test('a DS matching no key is dnskeyMissing (9)', () async {
+      const broken = '_443._tcp.www.broken.test.';
+      h.dns.on(broken, RRType.tlsa, FakeResponse(answers: h.broken.signed_([tlsa(broken)])));
+      final result = await TlsaResolver(validator: h.validator()).lookupName(n(broken));
+      expect(result.error, ValidationError.dnskeyMissing);
+    });
+
+    test('stripped signatures are rrsigsMissing (10)', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [tlsa(name)]));
+      h.dns.on(name, RRType.soa, FakeResponse(authority: h.example.signed_([h.example.soa])));
+      expect((await lookup()).error, ValidationError.rrsigsMissing);
+    });
+
+    test('a denial without a valid proof is nsecMissing (12)', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(authority: [
+        ...h.example.signed_([h.example.soa]),
+        ...h.example.signed_([h.example.nsec(name, 'a.www.example.test.', {RRType.tlsa})]),
+      ]));
+      expect((await lookup()).error, ValidationError.nsecMissing);
+    });
+
+    test('a SERVFAIL is resolverError (22)', () async {
+      expect((await lookup()).error, ValidationError.resolverError);
+    });
+
+    test('a transport failure is networkError (23)', () async {
+      final v = DnssecValidator(_FailingTransport(), trustAnchors: [h.root.dsValue], clock: () => testNow);
+      expect((await lookup(v)).error, ValidationError.networkError);
+    });
+
+    test('a CNAME loop is invalidData (24)', () async {
+      const other = '_443._tcp.b.example.test.';
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([rr(n(name), RRType.cname, n(other).toWire())])));
+      h.dns.on(other, RRType.tlsa, FakeResponse(answers: h.example.signed_([rr(n(other), RRType.cname, n(name).toWire())])));
+      expect((await lookup()).error, ValidationError.invalidData);
+    });
+
+    test('an unsigned zone has none; a SHA-1-only zone is unsupportedAlgorithm (1)', () async {
+      const unsigned = '_443._tcp.www.unsigned.test.';
+      h.dns.on(unsigned, RRType.tlsa, FakeResponse(answers: [tlsa(unsigned)]));
+      h.dns.on(unsigned, RRType.soa, FakeResponse(authority: [h.unsigned.soa]));
+      final plain = await TlsaResolver(validator: h.validator()).lookupName(n(unsigned));
+      expect(plain.status, SecurityStatus.insecure);
+      expect(plain.error, isNull);
+
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+      h.dns.on('example.test.', RRType.ds,
+          FakeResponse(answers: h.test.signed_([h.example.dsWith(digestType: 1)])));
+      final sha1 = await lookup(DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, sha1: Sha1Policy.unsupported));
+      expect(sha1.status, SecurityStatus.insecure);
+      expect(sha1.error, ValidationError.unsupportedAlgorithm);
+    });
+
+    test('NSEC3 opt-out is insecure without an error; too many iterations is (27)', () async {
+      const missing = '_443._tcp.www.nsec3.test.';
+      Future<TlsaResult> nxWith({bool optOut = false, int rounds = 1}) async {
+        final chain = h.nsec3.nsec3Chain({
+          'nsec3.test.': {RRType.soa, RRType.ns, RRType.dnskey},
+          'mail.nsec3.test.': {RRType.a},
+        }, optOut: optOut, rounds: rounds);
+        h.dns.on(missing, RRType.tlsa, FakeResponse(rcode: Rcode.nxDomain, authority: [
+          ...h.nsec3.signed_([h.nsec3.soa]),
+          for (final r in chain) ...h.nsec3.signed_([r]),
+        ]));
+        return TlsaResolver(validator: h.validator()).lookupName(n(missing));
+      }
+
+      final optOut = await nxWith(optOut: true);
+      expect(optOut.status, SecurityStatus.insecure, reason: optOut.reason);
+      expect(optOut.error, isNull);
+      expect(optOut.reason, contains('opt-out'));
+
+      final heavy = await nxWith(rounds: 151);
+      expect(heavy.status, SecurityStatus.insecure, reason: heavy.reason);
+      expect(heavy.error, ValidationError.unsupportedNsec3Iterations);
+      expect(heavy.error!.edeCode, 27);
+    });
+
+    test('running out of queries is limitExceeded', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+      final result = await lookup(DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, maxQueries: 1));
+      expect(result.error, ValidationError.limitExceeded);
+      expect(result.error!.edeCode, 0);
+    });
+  });
+
   test('transport failure is indeterminate', () async {
     final result = await h.resolver().lookupName(n('_443._tcp.nothing.example.test.'));
     expect(result.status, SecurityStatus.indeterminate);
@@ -542,6 +668,11 @@ void main() {
       expect(result.status, SecurityStatus.secure, reason: result.reason);
     });
   });
+}
+
+class _FailingTransport implements DnsTransport {
+  @override
+  Future<Uint8List> send(Uint8List query) => throw DnsTransportException('unplugged');
 }
 
 class _SlowTransport implements DnsTransport {

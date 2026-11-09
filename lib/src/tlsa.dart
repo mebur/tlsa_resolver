@@ -105,6 +105,7 @@ class TlsaResult {
   SecurityStatus get status => answer.status;
   bool get isSecure => answer.status == SecurityStatus.secure;
   String? get reason => answer.reason;
+  ValidationError? get error => answer.error;
 
   /// Records DANE should act on: present only when the answer is secure.
   List<TlsaRecord> get usableRecords =>

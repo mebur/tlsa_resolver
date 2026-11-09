@@ -10,10 +10,13 @@ enum Proof {
   /// The records prove the claim.
   proven,
 
-  /// The claim is covered only by an NSEC3 opt-out span, or the zone uses
-  /// more NSEC3 iterations than [maxNsec3Iterations]; the answer is treated
-  /// as insecure.
-  insecure,
+  /// The claim is covered only by an NSEC3 opt-out span: the answer is
+  /// insecure.
+  optOut,
+
+  /// The zone uses more NSEC3 iterations than [maxNsec3Iterations]: the
+  /// answer is treated as insecure (RFC 9276).
+  tooManyIterations,
 
   /// The records do not prove the claim.
   failed,
@@ -141,16 +144,16 @@ class Nsec3Prover {
   }
 
   Proof proveNxDomain(DnsName name) {
-    if (tooManyIterations) return Proof.insecure;
+    if (tooManyIterations) return Proof.tooManyIterations;
     if (_matching(name) != null) return Proof.failed; // The name exists.
     final ce = _closestEncloser(name);
     if (ce == null) return Proof.failed;
     if (_covering(_wildcardAt(ce.$1)) == null) return Proof.failed;
-    return ce.$2.optOut ? Proof.insecure : Proof.proven;
+    return ce.$2.optOut ? Proof.optOut : Proof.proven;
   }
 
   Proof proveNoData(DnsName name, int type) {
-    if (tooManyIterations) return Proof.insecure;
+    if (tooManyIterations) return Proof.tooManyIterations;
     final match = _matching(name);
     if (match != null) {
       if (!_typeAbsent(match.types, type)) return Proof.failed;
@@ -162,7 +165,7 @@ class Nsec3Prover {
     final ce = _closestEncloser(name);
     if (ce == null) return Proof.failed;
     // §8.6: no DS at an unsigned delegation inside an opt-out span.
-    if (type == RRType.ds) return ce.$2.optOut ? Proof.insecure : Proof.failed;
+    if (type == RRType.ds) return ce.$2.optOut ? Proof.optOut : Proof.failed;
     // §8.7: wildcard NODATA.
     final wildcard = _matching(_wildcardAt(ce.$1));
     if (wildcard != null && _typeAbsent(wildcard.types, type)) return Proof.proven;
@@ -172,7 +175,7 @@ class Nsec3Prover {
   /// §8.8: an answer expanded from a wildcard at the ancestor with
   /// [rrsigLabels] labels needs the next closer name covered.
   Proof proveWildcardExpansion(DnsName name, int rrsigLabels) {
-    if (tooManyIterations) return Proof.insecure;
+    if (tooManyIterations) return Proof.tooManyIterations;
     return _covering(name.suffix(rrsigLabels + 1)) != null
         ? Proof.proven
         : Proof.failed;

@@ -64,7 +64,7 @@ class TlsaResolver {
     if (address.status == SecurityStatus.bogus || address.status == SecurityStatus.indeterminate) {
       return TlsaResult(ValidatedAnswer(
           name: owner(hostName), type: RRType.tlsa, status: address.status,
-          reason: 'Address lookup for $hostName failed: ${address.reason}'));
+          reason: 'Address lookup for $hostName failed: ${address.reason}', error: address.error));
     }
     if (address.status == SecurityStatus.secure && address.aliases.isNotEmpty) {
       final expanded = await lookupName(owner(address.canonicalName));

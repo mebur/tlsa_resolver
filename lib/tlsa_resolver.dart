@@ -6,7 +6,7 @@ export 'src/dane.dart';
 export 'src/dnssec/trust_anchors.dart' show rootTrustAnchors;
 export 'src/dnssec/isolate_validator.dart';
 export 'src/dnssec/validator.dart'
-    show DnssecLookup, DnssecValidator, SecurityStatus, Sha1Policy, ValidatedAnswer;
+    show DnssecLookup, DnssecValidator, SecurityStatus, Sha1Policy, ValidatedAnswer, ValidationError;
 export 'src/resolver.dart';
 export 'src/tlsa.dart';
 export 'src/transport/direct_transport.dart';

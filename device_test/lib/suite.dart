@@ -220,6 +220,7 @@ List<String> detailLines(CaseResult r) {
       'status=${result.status.name} records=${result.answer.records.length}'
           ' usable=${result.usableRecords.length} nx=${result.answer.nxDomain}'
           '${result.answer.aliases.isEmpty ? '' : ' via=${result.answer.aliases.join(',')}'}',
+      if (result.error != null) 'error: ${result.error!.name} (EDE ${result.error!.edeCode})',
       if (result.reason != null) 'reason: ${result.reason}',
       for (final record in result.records) 'tlsa: $record',
     ],

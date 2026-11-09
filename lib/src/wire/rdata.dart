@@ -53,6 +53,9 @@ class Rrsig {
     return _serialLessOrEqual(inception, t) && _serialLessOrEqual(t, expiration);
   }
 
+  /// Whether the validity period ended before [now].
+  bool isExpiredAt(int now) => !_serialLessOrEqual(now & 0xffffffff, expiration);
+
   static bool _serialLessOrEqual(int a, int b) =>
       a == b || ((b - a) & 0xffffffff) < 0x80000000;
 }

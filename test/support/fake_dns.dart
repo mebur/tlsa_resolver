@@ -127,23 +127,24 @@ class Zone {
   static final salt = [0xab, 0xcd];
   static const iterations = 1;
 
-  Uint8List nsec3HashOf(String name) {
+  Uint8List nsec3HashOf(String name, {int rounds = iterations}) {
     var h = sha1.convert([...n(name).toCanonicalWire(), ...salt]).bytes;
-    for (var i = 0; i < iterations; i++) {
+    for (var i = 0; i < rounds; i++) {
       h = sha1.convert([...h, ...salt]).bytes;
     }
     return Uint8List.fromList(h);
   }
 
   /// NSEC3 chain for the given names (with their types), sorted by hash.
-  List<ResourceRecord> nsec3Chain(Map<String, Set<int>> names, {bool optOut = false}) {
+  List<ResourceRecord> nsec3Chain(Map<String, Set<int>> names,
+      {bool optOut = false, int rounds = iterations}) {
     final entries = [
-      for (final e in names.entries) (nsec3HashOf(e.key), e.value),
+      for (final e in names.entries) (nsec3HashOf(e.key, rounds: rounds), e.value),
     ]..sort((a, b) => _cmp(a.$1, b.$1));
     return [
       for (var i = 0; i < entries.length; i++)
         rr(n('${_b32(entries[i].$1)}.$apex'), RRType.nsec3, [
-          1, optOut ? 1 : 0, ..._u16(iterations), salt.length, ...salt,
+          1, optOut ? 1 : 0, ..._u16(rounds), salt.length, ...salt,
           20, ...entries[(i + 1) % entries.length].$1,
           ...typeBitmap(entries[i].$2.isEmpty ? <int>{} : {...entries[i].$2, RRType.rrsig}),
         ]),
