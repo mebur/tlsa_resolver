@@ -59,9 +59,9 @@ has **not been independently audited**. In its place:
   and weekly. The only difference is Ed448 (see below).
 * A fuzz test corrupts resolver responses and checks that no tampered
   answer is ever reported as secure.
-* The live suite in `device_test/` passes on an iPhone (iOS 27) through the
-  system resolver. On Android the package builds but has not yet been run
-  on a device.
+* The live suite in `device_test/` passes on an iPhone (iOS 27) over Wi-Fi
+  and mobile data, through the system resolver and DNS over HTTPS. On
+  Android the package builds but has not yet been run on a device.
 
 Known limits:
 
