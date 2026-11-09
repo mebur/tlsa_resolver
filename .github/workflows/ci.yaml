@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so changes in the corpus zones or in Unbound show up.
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: dart analyze lib test tool hook
+      - run: dart test -x network
+
+  differential:
+    # Compares the validator with Unbound on ~750 live lookups; see
+    # tool/differential.dart.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+      - run: sudo apt-get update && sudo apt-get install -y unbound-host
+      - run: flutter pub get
+      - run: dart run tool/differential.dart --server 9.9.9.9

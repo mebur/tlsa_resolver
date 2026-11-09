@@ -123,6 +123,27 @@ dart test -x network      # offline only
 dart run tool/probe.dart _25._tcp.mail.ietf.org
 ```
 
+### Differential testing against Unbound
+
+`tool/differential.dart` looks up about 750 names with this validator and
+with Unbound's `unbound-host`, which recurses and validates independently,
+using the same root trust anchors, and lists every answer they disagree on.
+The corpus covers signed and unsigned domains across many TLDs, denial
+proofs for missing names, DANE for SMTP at each domain's mail servers, and
+RootCanary's test zones for every algorithm, DS digest and NSEC type, each
+with a validly and an invalidly signed name.
+
+```sh
+brew install unbound            # or: apt-get install unbound-host
+dart run tool/differential.dart               # validator via 9.9.9.9
+dart run tool/differential.dart --system      # via the system resolver
+```
+
+It exits with 1 when the two disagree on whether an answer is secure, on the
+status, or on the data of a secure answer. Expected differences are listed
+in the tool with their reason; currently that is only Ed448 (algorithm 16),
+which this package does not support. CI runs it on every push and weekly.
+
 `device_test/` is a Flutter app that runs a live test suite on a phone or
 tablet; see its README.
 
