@@ -53,7 +53,7 @@ void main() {
     test('expired signatures are bogus', () async {
       const name = '_443._tcp.www.example.test.';
       h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
-        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: -100, expirationOffset: -10),
+        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: -86400, expirationOffset: -7200),
       ]));
       expect((await h.resolver().lookupName(n(name))).reason, contains('No valid signature'));
     });
@@ -367,7 +367,7 @@ void main() {
 
     test('expired signatures are signatureExpired (7)', () async {
       h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
-        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: -100, expirationOffset: -10),
+        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: -86400, expirationOffset: -7200),
       ]));
       final result = await lookup();
       expect(result.error, ValidationError.signatureExpired);
@@ -376,7 +376,7 @@ void main() {
 
     test('signatures from the future are signatureNotYetValid (8)', () async {
       h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
-        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: 3600, expirationOffset: 7200),
+        tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: 7200, expirationOffset: 86400),
       ]));
       final result = await lookup();
       expect(result.error, ValidationError.signatureNotYetValid);
@@ -468,6 +468,74 @@ void main() {
           trustAnchors: [h.root.dsValue], clock: () => testNow, maxQueries: 1));
       expect(result.error, ValidationError.limitExceeded);
       expect(result.error!.edeCode, 0);
+    });
+  });
+
+  group('clock tolerance', () {
+    const name = '_443._tcp.www.example.test.';
+
+    void signedWith({required int inception, required int expiration}) => h.dns.on(name, RRType.tlsa,
+        FakeResponse(answers: [
+          tlsa(name), h.example.sign([tlsa(name)], inceptionOffset: inception, expirationOffset: expiration),
+        ]));
+
+    test('signatures a few minutes outside their period still count by default', () async {
+      signedWith(inception: -86400, expiration: -300); // expired five minutes ago
+      expect((await h.resolver().lookupName(n(name))).status, SecurityStatus.secure);
+      h = TestHierarchy();
+      signedWith(inception: 300, expiration: 86400); // valid in five minutes
+      expect((await h.resolver().lookupName(n(name))).status, SecurityStatus.secure);
+    });
+
+    test('clockSkew zero is strict', () async {
+      signedWith(inception: -86400, expiration: -300);
+      final strict = DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, clockSkew: Duration.zero);
+      final result = await TlsaResolver(validator: strict).lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.error, ValidationError.signatureExpired);
+    });
+  });
+
+  group('negative trust anchors (RFC 7646)', () {
+    const broken = '_443._tcp.www.broken.test.', fine = '_443._tcp.www.example.test.';
+
+    setUp(() {
+      h.dns.on(broken, RRType.tlsa, FakeResponse(answers: h.broken.signed_([tlsa(broken)])));
+      h.dns.on(fine, RRType.tlsa, FakeResponse(answers: [tlsa(fine), Zone('example.test.').sign([tlsa(fine)])]));
+    });
+
+    TlsaResolver withAnchor(DateTime until) => TlsaResolver(validator: DnssecValidator(h.dns,
+        trustAnchors: [h.root.dsValue], clock: () => testNow,
+        negativeTrustAnchors: {n('broken.test.'): until}));
+
+    test('turn a broken zone insecure until they expire', () async {
+      final result = await withAnchor(testNow.add(const Duration(hours: 1))).lookupName(n(broken));
+      expect(result.status, SecurityStatus.insecure, reason: result.reason);
+      expect(result.reason, contains('negative trust anchor'));
+      expect(result.error, isNull);
+      expect(result.records, hasLength(1));
+      expect(result.daneApplies, isFalse);
+    });
+
+    test('have no effect once expired', () async {
+      final result = await withAnchor(testNow.subtract(const Duration(seconds: 1))).lookupName(n(broken));
+      expect(result.status, SecurityStatus.bogus);
+    });
+
+    test('do not cover other zones', () async {
+      final result = await withAnchor(testNow.add(const Duration(hours: 1))).lookupName(n(fine));
+      expect(result.status, SecurityStatus.bogus);
+    });
+
+    test('end exactly when they expire, even with keys cached', () async {
+      var now = testNow;
+      final resolver = TlsaResolver(validator: DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => now,
+          negativeTrustAnchors: {n('broken.test.'): testNow.add(const Duration(minutes: 10))}));
+      expect((await resolver.lookupName(n(broken))).status, SecurityStatus.insecure);
+      now = testNow.add(const Duration(minutes: 11));
+      expect((await resolver.lookupName(n(broken))).status, SecurityStatus.bogus);
     });
   });
 

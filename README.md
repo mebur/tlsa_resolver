@@ -194,6 +194,14 @@ status, or on the data of a secure answer. Expected differences are listed
 in the tool with their reason; currently that is only Ed448 (algorithm 16),
 which this package does not support. CI runs it on every push and weekly.
 
+* Signatures count up to `clockSkew` (default one hour) outside their
+  validity period, since phone clocks are often a few minutes off;
+  `Duration.zero` is strict. A signature that is still outside reports
+  `signatureExpired` or `signatureNotYetValid`.
+* `negativeTrustAnchors` (RFC 7646) maps domains whose DNSSEC is known to be
+  broken to the time the exception ends; until then, answers at or below
+  them are insecure instead of bogus. Use them briefly: meanwhile a forged
+  answer there is accepted as merely insecure.
 * Zone keys are cached for their TTL, for at most `maxCachedZones` zones
   (default 1000); past that the least recently used zone is dropped.
 

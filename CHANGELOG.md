@@ -37,3 +37,7 @@
   closest Extended DNS Error code (RFC 8914) for every non-secure answer
   that is a failure, alongside the `reason` text. Expired and not yet valid
   signatures, and NSEC3 opt-out and iteration limits, are told apart.
+* `clockSkew` (default one hour) lets signatures count slightly outside
+  their validity period, for devices with a wrong clock.
+* `negativeTrustAnchors` (RFC 7646): time-limited exceptions for domains
+  whose DNSSEC is known to be broken.

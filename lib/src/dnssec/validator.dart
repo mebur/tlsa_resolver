@@ -172,9 +172,13 @@ class DnssecValidator implements DnssecLookup {
     this.maxQueries = 64,
     this.maxSignatureChecks = 64,
     this.maxCachedZones = 1000,
+    this.clockSkew = const Duration(hours: 1),
+    Map<DnsName, DateTime> negativeTrustAnchors = const {},
     this.timeout = const Duration(seconds: 20),
   })  : trustAnchors = trustAnchors ?? rootTrustAnchors,
+        negativeTrustAnchors = Map.unmodifiable(negativeTrustAnchors),
         _clock = clock ?? DateTime.now {
+    if (clockSkew.isNegative) throw ArgumentError.value(clockSkew, 'clockSkew');
     if (maxQueries < 1) throw ArgumentError.value(maxQueries, 'maxQueries');
     if (maxCachedZones < 1) throw ArgumentError.value(maxCachedZones, 'maxCachedZones');
     if (maxSignatureChecks < 1) {
@@ -210,6 +214,19 @@ class DnssecValidator implements DnssecLookup {
   /// the least recently used zone is dropped, so lookups across many zones
   /// cannot grow memory without bound.
   final int maxCachedZones;
+
+  /// How far outside a signature's validity period the clock may be and
+  /// the signature still count, in both directions. Phones are often a few
+  /// minutes off, and their owners rarely notice. The default allows an
+  /// hour; [Duration.zero] is strict.
+  final Duration clockSkew;
+
+  /// Domains whose DNSSEC is known to be broken, each with the time its
+  /// exception ends (RFC 7646). Until then, answers at or below the domain
+  /// are insecure instead of bogus, with a reason that says why. Use them
+  /// briefly, while the zone's operator fixes it: during that time a forged
+  /// answer for the domain is accepted as merely insecure.
+  final Map<DnsName, DateTime> negativeTrustAnchors;
 
   /// Longest one [resolve] may take; after that it is
   /// [SecurityStatus.indeterminate].
@@ -600,6 +617,14 @@ class DnssecValidator implements DnssecLookup {
   // Zone keys
 
   Future<_ZoneKeys> _keysFor(DnsName zone) {
+    // Not cached, so the exception ends exactly when the anchor expires.
+    final exempt = _negativeTrustAnchorFor(zone);
+    if (exempt != null) {
+      return Future.value(_ZoneKeys.insecure(
+          _why(null, 'Validation of $exempt is off until ${negativeTrustAnchors[exempt]} '
+              '(negative trust anchor)'),
+          null));
+    }
     final cached = _keyCache.remove(zone);
     if (cached != null && (cached.expires == null || cached.expires! > _now)) {
       _keyCache[zone] = cached; // now the most recently used
@@ -722,6 +747,16 @@ class DnssecValidator implements DnssecLookup {
     return _ZoneKeys.secure(keys, _ttl(rrset));
   }
 
+  /// The active negative trust anchor covering [zone], if any.
+  DnsName? _negativeTrustAnchorFor(DnsName zone) {
+    if (negativeTrustAnchors.isEmpty) return null;
+    final now = _clock();
+    for (final MapEntry(key: domain, value: until) in negativeTrustAnchors.entries) {
+      if (zone.isSubdomainOf(domain) && now.isBefore(until)) return domain;
+    }
+    return null;
+  }
+
   /// Explains a root key set that no trust anchor matches. After a root
   /// key rollover that is what stale built-in anchors look like; it is also
   /// what a resolver forging root keys looks like.
@@ -755,8 +790,9 @@ class DnssecValidator implements DnssecLookup {
     final relevant = [for (final s in sigs) if (s.signer == signer && s.typeCovered == type) s];
     if (relevant.isEmpty) return _why(ValidationError.rrsigsMissing, '$text: no signatures by $signer');
     final now = _now;
-    if (relevant.every((s) => !s.isValidAt(now))) {
-      return relevant.any((s) => s.isExpiredAt(now))
+    final skew = clockSkew.inSeconds;
+    if (relevant.every((s) => !s.isValidAt(now, skew: skew))) {
+      return relevant.any((s) => s.isExpiredAt(now, skew: skew))
           ? _why(ValidationError.signatureExpired, '$text: signatures expired')
           : _why(ValidationError.signatureNotYetValid, '$text: signatures not valid yet (check the clock)');
     }
@@ -776,7 +812,7 @@ class DnssecValidator implements DnssecLookup {
       if (sig.signer != zone ||
           sig.typeCovered != rrset.first.type ||
           sig.labels > owner.rrsigLabelCount ||
-          !sig.isValidAt(now) ||
+          !sig.isValidAt(now, skew: clockSkew.inSeconds) ||
           !_algorithms.contains(sig.algorithm)) {
         continue;
       }

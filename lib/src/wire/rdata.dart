@@ -48,13 +48,15 @@ class Rrsig {
 
   /// Whether [now] (seconds since epoch) is inside the validity window, using
   /// serial number arithmetic (RFC 1982) as RFC 4034 §3.1.5 requires.
-  bool isValidAt(int now) {
-    final t = now & 0xffffffff;
-    return _serialLessOrEqual(inception, t) && _serialLessOrEqual(t, expiration);
-  }
+  /// Whether [now] (seconds since the epoch) lies in the validity period,
+  /// widened by [skew] seconds on both sides.
+  bool isValidAt(int now, {int skew = 0}) =>
+      _serialLessOrEqual(inception, (now + skew) & 0xffffffff) &&
+      _serialLessOrEqual((now - skew) & 0xffffffff, expiration);
 
-  /// Whether the validity period ended before [now].
-  bool isExpiredAt(int now) => !_serialLessOrEqual(now & 0xffffffff, expiration);
+  /// Whether the validity period, widened by [skew], ended before [now].
+  bool isExpiredAt(int now, {int skew = 0}) =>
+      !_serialLessOrEqual((now - skew) & 0xffffffff, expiration);
 
   static bool _serialLessOrEqual(int a, int b) =>
       a == b || ((b - a) & 0xffffffff) < 0x80000000;
