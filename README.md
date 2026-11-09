@@ -81,6 +81,10 @@ The system resolver only has to pass DNSSEC records through (EDNS0 with the
 DO bit). Most public and ISP resolvers do. Ones that strip them make every
 signed name come back `bogus`, which is the safe failure.
 
+Queries advertise a 1232-byte UDP payload (RFC 9715). Larger signed answers
+come back truncated and are fetched again over TCP, so DNS over TCP (port 53)
+must not be blocked; where it is, `DohTransport` works over HTTPS instead.
+
 ## What gets validated
 
 * RRSIG verification for RSA/SHA-1, RSA/SHA-256, RSA/SHA-512, ECDSA P-256 and
@@ -147,7 +151,8 @@ CNAME chain validates, the records are looked up at the chain's final target
 first and at `host` only if the target has none; with an insecure chain,
 `host` alone is used. `result.answer.name` says which name answered. A bogus
 or unanswered address lookup is returned as a failure rather than a
-fallback. `followCname: false` skips the address lookup, and `lookupName`
+fallback. The address lookup is one extra query per call (apps usually
+resolve the address anyway). `followCname: false` skips it, and `lookupName`
 takes an explicit owner name such as `_25._tcp.mail.example.com`.
 
 ## DANE matching
