@@ -619,13 +619,30 @@ class DnssecValidator implements DnssecLookup {
         if (usable.any((ds) => dsMatchesKey(ds, key, zone))) key,
     ];
     if (anchored.isEmpty) {
-      return _ZoneKeys.fail(SecurityStatus.bogus, 'No DNSKEY of $zone matches its DS');
+      return _ZoneKeys.fail(SecurityStatus.bogus,
+          zone.isRoot ? _rootMismatch(keys) : 'No DNSKEY of $zone matches its DS');
     }
     final sigs = _sigs(msg.answers, zone, RRType.dnskey);
     if (_verifyRRset(rrset, sigs, zone, anchored) == null) {
       return _ZoneKeys.fail(SecurityStatus.bogus, 'DNSKEY set of $zone is not signed by a key its DS vouches for');
     }
     return _ZoneKeys.secure(keys, _ttl(rrset));
+  }
+
+  /// Explains a root key set that no trust anchor matches. After a root
+  /// key rollover that is what stale built-in anchors look like; it is also
+  /// what a resolver forging root keys looks like.
+  String _rootMismatch(List<Dnskey> keys) {
+    final anchorTags = {for (final ds in trustAnchors) ds.keyTag}.join(', ');
+    final rootTags = {for (final key in keys) if (key.isSecureEntryPoint) key.keyTag}.join(', ');
+    final source = identical(trustAnchors, rootTrustAnchors)
+        ? 'the root trust anchors built into tlsa_resolver'
+        : 'the configured trust anchors';
+    return 'No root key matches $source (key tags $anchorTags; '
+        'the root zone offers ${rootTags.isEmpty ? 'no key-signing keys' : 'key tags $rootTags'}). '
+        'Either the anchors are out of date after a root key rollover, so update tlsa_resolver '
+        'or pass current trustAnchors (https://data.iana.org/root-anchors/), or the resolver '
+        'returned forged root keys.';
   }
 
   static int _ttl(List<ResourceRecord> records) {

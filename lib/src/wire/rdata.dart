@@ -75,6 +75,9 @@ class Dnskey {
   final Uint8List publicKey;
 
   bool get isZoneKey => flags & 0x0100 != 0;
+
+  /// The SEP flag: conventionally set on key-signing keys (RFC 4034 §2.1.1).
+  bool get isSecureEntryPoint => flags & 0x0001 != 0;
   bool get isRevoked => flags & 0x0080 != 0;
   bool get isSep => flags & 0x0001 != 0;
 

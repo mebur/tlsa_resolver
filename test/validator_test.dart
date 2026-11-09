@@ -80,8 +80,20 @@ void main() {
           trustAnchors: [Zone('.').dsValue], clock: () => testNow);
       final result = await TlsaResolver(validator: validator).lookupName(n(name));
       expect(result.status, SecurityStatus.bogus);
-      expect(result.reason, contains('No DNSKEY of .'));
+      expect(result.reason, contains('No root key matches the configured trust anchors'));
+      expect(result.reason, contains('key tags ${h.root.keyTag}'));
+      expect(result.reason, contains('out of date'));
     });
+  });
+
+  test('stale built-in anchors are named as such', () async {
+    // The fake root is signed by a key the real IANA anchors do not match,
+    // which is what the built-in anchors look like after a root rollover.
+    const name = '_443._tcp.www.example.test.';
+    h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+    final result = await TlsaResolver(transport: h.dns).lookupName(n(name));
+    expect(result.status, SecurityStatus.bogus);
+    expect(result.reason, contains('the root trust anchors built into tlsa_resolver (key tags 20326, 38696'));
   });
 
   group('unsigned zones', () {
