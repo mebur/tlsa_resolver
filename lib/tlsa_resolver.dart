@@ -4,7 +4,7 @@ library;
 
 export 'src/dane.dart';
 export 'src/dnssec/trust_anchors.dart' show rootTrustAnchors;
-export 'src/dnssec/validator.dart' show DnssecValidator, SecurityStatus, ValidatedAnswer;
+export 'src/dnssec/validator.dart' show DnssecValidator, SecurityStatus, Sha1Policy, ValidatedAnswer;
 export 'src/resolver.dart';
 export 'src/tlsa.dart';
 export 'src/transport/direct_transport.dart';

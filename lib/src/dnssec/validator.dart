@@ -26,6 +26,23 @@ enum SecurityStatus {
   indeterminate,
 }
 
+/// How the validator treats DNSSEC's SHA-1 based algorithms: RSASHA1 (5),
+/// RSASHA1-NSEC3-SHA1 (7) and SHA-1 DS digests (1). NSEC3 name hashing
+/// also uses SHA-1 but only hides names, so it is not affected.
+enum Sha1Policy {
+  /// Validate them like any other algorithm (RFC 8624).
+  accept,
+
+  /// Treat them as unsupported: a zone that can only be validated through
+  /// SHA-1 is [SecurityStatus.insecure], like an unsigned zone
+  /// (RFC 4035 §5.2).
+  unsupported,
+
+  /// A zone that can only be validated through SHA-1 is
+  /// [SecurityStatus.bogus].
+  reject,
+}
+
 /// The validated outcome of looking up one name and type.
 class ValidatedAnswer {
   ValidatedAnswer({
@@ -66,19 +83,46 @@ class ValidatedAnswer {
 /// [DnsTransport]) for data plus signatures and checks the whole chain of
 /// trust from the root trust anchors itself, following RFC 4033–4035,
 /// RFC 5155 and RFC 6840.
+///
+/// Each [resolve] is bounded by [maxQueries] and [timeout], so a hostile
+/// resolver cannot keep it busy with endless delegations or slow answers.
 class DnssecValidator {
   DnssecValidator(
     this.transport, {
     List<Ds>? trustAnchors,
     DateTime Function()? clock,
     this.maxAliases = 8,
+    this.sha1 = Sha1Policy.accept,
+    this.maxQueries = 64,
+    this.timeout = const Duration(seconds: 20),
   })  : trustAnchors = trustAnchors ?? rootTrustAnchors,
-        _clock = clock ?? DateTime.now;
+        _clock = clock ?? DateTime.now {
+    if (maxQueries < 1) throw ArgumentError.value(maxQueries, 'maxQueries');
+    if (timeout <= Duration.zero) throw ArgumentError.value(timeout, 'timeout');
+  }
 
   final DnsTransport transport;
   final List<Ds> trustAnchors;
   final int maxAliases;
+  final Sha1Policy sha1;
+
+  /// Most DNS queries one [resolve] may send, including those for zone
+  /// keys and denial proofs. Cached zone keys cost nothing.
+  final int maxQueries;
+
+  /// Longest one [resolve] may take; after that it is
+  /// [SecurityStatus.indeterminate].
+  final Duration timeout;
+
   final DateTime Function() _clock;
+
+  late final Set<int> _algorithms = sha1 == Sha1Policy.accept
+      ? DnssecAlgorithm.supported
+      : DnssecAlgorithm.supported
+          .difference({DnssecAlgorithm.rsaSha1, DnssecAlgorithm.rsaSha1Nsec3Sha1});
+  late final Set<int> _digests = sha1 == Sha1Policy.accept
+      ? DigestType.supported
+      : DigestType.supported.difference({DigestType.sha1});
 
   final _keyCache = <DnsName, _CachedKeys>{};
 
@@ -89,7 +133,21 @@ class DnssecValidator {
 
   /// Looks up [type] at [name], following CNAMEs, and validates every step.
   /// The overall status is the weakest of the steps.
-  Future<ValidatedAnswer> resolve(DnsName name, int type) async {
+  Future<ValidatedAnswer> resolve(DnsName name, int type) {
+    // The budget travels in a zone so every query of this lookup draws on
+    // it. Zone keys fetched for one lookup and awaited by a concurrent one
+    // count against the lookup that started the fetch.
+    final budget = _Budget(maxQueries, timeout);
+    return runZoned(() => _resolve(name, type), zoneValues: {_Budget: budget})
+        .timeout(timeout, onTimeout: () {
+      budget.expire();
+      return ValidatedAnswer(
+          name: name, type: type, status: SecurityStatus.indeterminate,
+          reason: budget.timeoutReason);
+    });
+  }
+
+  Future<ValidatedAnswer> _resolve(DnsName name, int type) async {
     final aliases = <DnsName>[];
     var current = name;
     var status = SecurityStatus.secure;
@@ -140,8 +198,18 @@ class DnssecValidator {
 
   Future<(DnsMessage?, String?)> _query(DnsName name, int type) async {
     final query = DnsMessage.buildQuery(name, type);
+    final budget = Zone.current[_Budget] as _Budget?;
+    if (budget != null) {
+      final refusal = budget.take();
+      if (refusal != null) return (null, refusal);
+    }
     try {
-      final bytes = await transport.send(query);
+      var response = transport.send(query);
+      if (budget != null) {
+        response = response.timeout(budget.remaining,
+            onTimeout: () => throw DnsTransportException(budget.timeoutReason));
+      }
+      final bytes = await response;
       final msg = DnsMessage.parse(bytes);
       if (!msg.isResponse || msg.id != DnsMessage.queryId(query)) {
         return (null, 'Response does not match query for $name');
@@ -440,14 +508,29 @@ class DnssecValidator {
 
     // RFC 4035 §5.2: if no DS uses a supported algorithm and digest, the
     // zone is treated as unsigned.
-    final usable = [
+    final known = [
       for (final ds in dsSet)
         if (DnssecAlgorithm.supported.contains(ds.algorithm) &&
             DigestType.supported.contains(ds.digestType))
           ds,
     ];
+    var usable = [
+      for (final ds in known)
+        if (_algorithms.contains(ds.algorithm) && _digests.contains(ds.digestType)) ds,
+    ];
     if (usable.isEmpty) {
-      return _ZoneKeys.insecure('No supported DS algorithm for $zone', 3600);
+      if (known.isEmpty) {
+        return _ZoneKeys.insecure('No supported DS algorithm for $zone', 3600);
+      }
+      final reason = 'Zone $zone can only be validated with SHA-1';
+      return sha1 == Sha1Policy.reject
+          ? _ZoneKeys.fail(SecurityStatus.bogus, reason)
+          : _ZoneKeys.insecure(reason, 3600);
+    }
+    // RFC 4509 §3: with a stronger digest present, SHA-1 DS records are
+    // ignored, so a forged SHA-1 match cannot stand in for the key.
+    if (usable.any((ds) => ds.digestType != DigestType.sha1)) {
+      usable = [for (final ds in usable) if (ds.digestType != DigestType.sha1) ds];
     }
 
     final (msg, error) = await _query(zone, RRType.dnskey);
@@ -499,7 +582,7 @@ class DnssecValidator {
           sig.typeCovered != rrset.first.type ||
           sig.labels > owner.rrsigLabelCount ||
           !sig.isValidAt(now) ||
-          !DnssecAlgorithm.supported.contains(sig.algorithm)) {
+          !_algorithms.contains(sig.algorithm)) {
         continue;
       }
       final data = _signedData(rrset, sig);
@@ -541,6 +624,32 @@ class DnssecValidator {
       out.add(rdata);
     }
     return out.toBytes();
+  }
+}
+
+/// What one [DnssecValidator.resolve] may still spend.
+class _Budget {
+  _Budget(this.maxQueries, this.timeout)
+      : _queriesLeft = maxQueries,
+        _watch = Stopwatch()..start();
+
+  final int maxQueries;
+  final Duration timeout;
+  final Stopwatch _watch;
+  int _queriesLeft;
+
+  Duration get remaining => timeout - _watch.elapsed;
+
+  String get timeoutReason => 'Lookup took longer than ${timeout.inMilliseconds} ms';
+
+  void expire() => _queriesLeft = -1;
+
+  /// Spends one query, or says why there is none left.
+  String? take() {
+    if (_queriesLeft < 0 || remaining <= Duration.zero) return timeoutReason;
+    if (_queriesLeft == 0) return 'Lookup needed more than $maxQueries DNS queries';
+    _queriesLeft--;
+    return null;
   }
 }
 

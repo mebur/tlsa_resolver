@@ -67,7 +67,12 @@ signed name come back `bogus`, which is the safe failure.
 * RRSIG verification for RSA/SHA-1, RSA/SHA-256, RSA/SHA-512, ECDSA P-256 and
   P-384, and Ed25519 (algorithms 5, 7, 8, 10, 13, 14, 15). Zones signed only
   with unsupported algorithms are treated as insecure (RFC 4035 §5.2).
-* DS digests SHA-1, SHA-256 and SHA-384.
+* DS digests SHA-1, SHA-256 and SHA-384. A SHA-1 DS is ignored when the
+  same DS set has a stronger digest (RFC 4509 §3).
+* `sha1:` sets how the SHA-1 based algorithms (RSASHA1, RSASHA1-NSEC3-SHA1
+  and SHA-1 DS digests) are treated: `Sha1Policy.accept` (default) validates
+  them, `unsupported` makes zones that depend on them `insecure`, and
+  `reject` makes them `bogus`.
 * Chain of trust from the root KSKs 20326 (KSK-2017) and 38696 (KSK-2024).
   Pass `trustAnchors:` to `DnssecValidator` to use others.
 * Authenticated denial of existence with NSEC (RFC 4035) and NSEC3
@@ -79,6 +84,21 @@ signed name come back `bogus`, which is the safe failure.
 * CNAME chains (every link is validated; the result is the weakest link) and
   CNAMEs synthesised from signed DNAMEs.
 * NSEC3 with more than 150 iterations is treated as insecure (RFC 9276).
+* Each lookup is capped at `maxQueries` DNS queries (default 64) and
+  `timeout` (default 20 s), including the queries for zone keys and proofs;
+  past either it is `indeterminate`. A resolver cannot keep a lookup busy
+  with long delegation chains or slow answers.
+
+```dart
+final resolver = TlsaResolver(
+  validator: DnssecValidator(
+    const NativeDnsTransport(),
+    sha1: Sha1Policy.unsupported,
+    maxQueries: 32,
+    timeout: const Duration(seconds: 10),
+  ),
+);
+```
 
 ## DANE matching
 

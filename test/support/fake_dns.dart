@@ -64,9 +64,14 @@ class Zone {
   }
 
   /// DS RRset (SHA-256) for this zone's key, owned by the apex.
-  ResourceRecord get ds {
-    final digest = sha256.convert([...apex.toCanonicalWire(), ...dnskey.rdata]).bytes;
-    return rr(apex, RRType.ds, [..._u16(keyTag), 15, 2, ...digest]);
+  ResourceRecord get ds => dsWith();
+
+  /// DS for this zone's key with another digest type, or claiming another
+  /// algorithm.
+  ResourceRecord dsWith({int digestType = 2, int algorithm = 15}) {
+    final data = [...apex.toCanonicalWire(), ...dnskey.rdata];
+    final digest = digestType == 1 ? sha1.convert(data).bytes : sha256.convert(data).bytes;
+    return rr(apex, RRType.ds, [..._u16(keyTag), algorithm, digestType, ...digest]);
   }
 
   Ds get dsValue => Ds.fromRecord(ds);

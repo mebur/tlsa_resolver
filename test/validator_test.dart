@@ -1,4 +1,8 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:test/test.dart';
+import 'package:tlsa_resolver/src/dnssec/crypto.dart';
 import 'package:tlsa_resolver/src/wire/message.dart';
 import 'package:tlsa_resolver/tlsa_resolver.dart';
 
@@ -271,4 +275,117 @@ void main() {
     await resolver.lookup('b.example.test', port: 443);
     expect(h.dns.queries.length - before, 1);
   });
+
+  group('SHA-1 policy', () {
+    const name = '_443._tcp.www.example.test.';
+
+    Future<TlsaResult> lookupWithDs(List<ResourceRecord> dsSet, Sha1Policy policy) {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+      h.dns.on('example.test.', RRType.ds, FakeResponse(answers: h.test.signed_(dsSet)));
+      final validator = DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, sha1: policy);
+      return TlsaResolver(validator: validator).lookupName(n(name));
+    }
+
+    test('a SHA-1 DS digest validates when accepted', () async {
+      final result = await lookupWithDs([h.example.dsWith(digestType: 1)], Sha1Policy.accept);
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+    });
+
+    test('a zone reachable only through a SHA-1 DS is insecure when unsupported', () async {
+      final result =
+          await lookupWithDs([h.example.dsWith(digestType: 1)], Sha1Policy.unsupported);
+      expect(result.status, SecurityStatus.insecure);
+      expect(result.reason, contains('only be validated with SHA-1'));
+      expect(result.daneApplies, isFalse);
+    });
+
+    test('a zone reachable only through a SHA-1 DS is bogus when rejected', () async {
+      final result = await lookupWithDs([h.example.dsWith(digestType: 1)], Sha1Policy.reject);
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('only be validated with SHA-1'));
+    });
+
+    test('a zone signed only with RSASHA1 follows the policy', () async {
+      // The DS claims algorithm 5; the policy decides before any key is
+      // looked at.
+      ResourceRecord ds() => h.example.dsWith(algorithm: DnssecAlgorithm.rsaSha1);
+      expect((await lookupWithDs([ds()], Sha1Policy.unsupported)).status, SecurityStatus.insecure);
+      h = TestHierarchy();
+      expect((await lookupWithDs([ds()], Sha1Policy.reject)).status, SecurityStatus.bogus);
+    });
+
+    test('SHA-1 alongside SHA-256 does not change the outcome', () async {
+      for (final policy in Sha1Policy.values) {
+        h = TestHierarchy();
+        final result = await lookupWithDs([h.example.dsWith(digestType: 1), h.example.ds], policy);
+        expect(result.status, SecurityStatus.secure, reason: '$policy: ${result.reason}');
+      }
+    });
+
+    test('a SHA-1 DS is ignored when a SHA-256 DS is present (RFC 4509)', () async {
+      // The SHA-256 digest is for another key, so only the SHA-1 one
+      // matches; it must not be used.
+      final ds = [h.example.dsWith(digestType: 1), Zone('example.test.').ds];
+      final result = await lookupWithDs(ds, Sha1Policy.accept);
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('matches its DS'));
+    });
+  });
+
+  group('lookup budget', () {
+    const name = '_443._tcp.www.example.test.';
+
+    setUp(() => h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)]))));
+
+    test('a lookup stops after maxQueries', () async {
+      final validator = DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, maxQueries: 2);
+      final result = await TlsaResolver(validator: validator).lookupName(n(name));
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(result.reason, contains('more than 2 DNS queries'));
+      expect(h.dns.queries, hasLength(2));
+    });
+
+    test('the default budget is enough for a cold lookup', () async {
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+    });
+
+    test('a slow resolver runs into the timeout', () async {
+      final validator = DnssecValidator(_SlowTransport(h.dns, const Duration(milliseconds: 40)),
+          trustAnchors: [h.root.dsValue], clock: () => testNow,
+          timeout: const Duration(milliseconds: 100));
+      final result = await TlsaResolver(validator: validator).lookupName(n(name));
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(result.reason, contains('took longer than 100 ms'));
+    });
+
+    test('a resolver that never answers cannot hold a lookup past the timeout', () async {
+      final validator = DnssecValidator(_HangingTransport(),
+          trustAnchors: [h.root.dsValue], clock: () => testNow,
+          timeout: const Duration(milliseconds: 100));
+      final watch = Stopwatch()..start();
+      final result = await validator.resolve(n(name), RRType.tlsa);
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+    });
+  });
+}
+
+class _SlowTransport implements DnsTransport {
+  _SlowTransport(this.inner, this.delay);
+  final DnsTransport inner;
+  final Duration delay;
+
+  @override
+  Future<Uint8List> send(Uint8List query) async {
+    await Future<void>.delayed(delay);
+    return inner.send(query);
+  }
+}
+
+class _HangingTransport implements DnsTransport {
+  @override
+  Future<Uint8List> send(Uint8List query) => Completer<Uint8List>().future;
 }
