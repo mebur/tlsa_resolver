@@ -238,6 +238,7 @@ class _Unbound {
   _Unbound(this.executable, this.anchors);
   final String executable;
   final String anchors;
+  static const timeout = Duration(seconds: 30);
 
   Future<String> version() async {
     final r = await Process.run(executable, ['-h']);
@@ -250,9 +251,21 @@ class _Unbound {
   /// `name is an alias for target. (secure)` or
   /// `Host name not found: 3(NXDOMAIN). (BOGUS (security failure))`.
   Future<_Outcome> lookup(_Query q) async {
-    final r = await Process.run(
+    // unbound-host has no timeout of its own and can hang on an
+    // unresponsive server; it is killed after [timeout].
+    final process = await Process.start(
         executable, ['-v', '-f', anchors, '-t', RRType.name(q.type), q.name]);
-    final lines = '${r.stdout}${r.stderr}'.split('\n').where((l) => l.trim().isNotEmpty).toList();
+    final stdout = process.stdout.transform(systemEncoding.decoder).join();
+    final stderr = process.stderr.transform(systemEncoding.decoder).join();
+    final exited = await process.exitCode.then((_) => true).timeout(timeout, onTimeout: () {
+      process.kill(ProcessSignal.sigkill);
+      return false;
+    });
+    if (!exited) {
+      return _Outcome(SecurityStatus.indeterminate,
+          detail: 'unbound-host did not finish within ${timeout.inSeconds} s');
+    }
+    final lines = '${await stdout}${await stderr}'.split('\n').where((l) => l.trim().isNotEmpty).toList();
     var status = SecurityStatus.secure;
     var tagged = false;
     var nx = false, records = 0;
