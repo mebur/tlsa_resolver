@@ -50,6 +50,7 @@ void main() {
       final opt = m.additional.single;
       expect(opt.type, RRType.opt);
       expect(opt.ttl & 0x8000, isNot(0)); // DO
+      expect(opt.cls, 1232); // UDP payload size (RFC 9715)
     });
 
     test('expands compressed names inside RDATA', () {

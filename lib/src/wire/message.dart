@@ -136,7 +136,11 @@ class DnsMessage {
   /// Builds a recursive query with an EDNS0 OPT record that sets the DO bit,
   /// so the resolver includes RRSIG, NSEC and NSEC3 records, and the CD bit,
   /// so it hands back data it could not validate itself for us to judge.
-  static Uint8List buildQuery(DnsName name, int type, {int? id, int udpSize = 4096}) {
+  ///
+  /// [udpSize] defaults to 1232 bytes (RFC 9715, DNS Flag Day 2020): larger
+  /// UDP answers get fragmented and fragments are often dropped, so the
+  /// resolver truncates them instead and the transport retries over TCP.
+  static Uint8List buildQuery(DnsName name, int type, {int? id, int udpSize = defaultUdpSize}) {
     final out = BytesBuilder(copy: false);
     final header = ByteData(12)
       ..setUint16(0, id ?? Random.secure().nextInt(0x10000))
@@ -161,6 +165,9 @@ class DnsMessage {
         .asUint8List());
     return out.toBytes();
   }
+
+  /// EDNS0 UDP payload size advertised in queries.
+  static const defaultUdpSize = 1232;
 
   static int queryId(Uint8List query) => (query[0] << 8) | query[1];
 

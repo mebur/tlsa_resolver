@@ -28,3 +28,6 @@
   anchors, with the key tags involved.
 * `lookup` uses the CNAME-expanded host name as TLSA base domain first when
   the chain is secure (RFC 7671 §7); `followCname: false` turns this off.
+* Queries advertise a 1232-byte EDNS0 UDP payload (RFC 9715) instead of
+  4096, so large answers come back truncated and are fetched over TCP
+  rather than fragmented.
