@@ -57,6 +57,7 @@ jobs:
     # The C shim on its own, with -Werror and the address and undefined
     # behaviour sanitizers, against each platform's libresolv.
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}

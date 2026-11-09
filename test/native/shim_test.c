@@ -1,9 +1,11 @@
-// Exercises the native shim on its own, built with AddressSanitizer and
-// UndefinedBehaviorSanitizer (see the README). Needs the system resolver.
-//
-//   cc -std=gnu11 -Wall -Wextra -Werror -g -fno-omit-frame-pointer \
-//      -fsanitize=address,undefined -Isrc src/tlsa_resolver.c \
-//      test/native/shim_test.c -lresolv -o build/shim_test && build/shim_test
+/*
+ * Exercises the native shim on its own, built with AddressSanitizer and
+ * UndefinedBehaviorSanitizer (see the README). Needs the system resolver.
+ *
+ *   cc -std=gnu11 -Wall -Wextra -Werror -g -fno-omit-frame-pointer \
+ *      -fsanitize=address,undefined -Isrc src/tlsa_resolver.c \
+ *      test/native/shim_test.c -lresolv -o build/shim_test && build/shim_test
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
