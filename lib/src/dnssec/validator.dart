@@ -94,10 +94,14 @@ class DnssecValidator {
     this.maxAliases = 8,
     this.sha1 = Sha1Policy.accept,
     this.maxQueries = 64,
+    this.maxSignatureChecks = 64,
     this.timeout = const Duration(seconds: 20),
   })  : trustAnchors = trustAnchors ?? rootTrustAnchors,
         _clock = clock ?? DateTime.now {
     if (maxQueries < 1) throw ArgumentError.value(maxQueries, 'maxQueries');
+    if (maxSignatureChecks < 1) {
+      throw ArgumentError.value(maxSignatureChecks, 'maxSignatureChecks');
+    }
     if (timeout <= Duration.zero) throw ArgumentError.value(timeout, 'timeout');
   }
 
@@ -109,6 +113,20 @@ class DnssecValidator {
   /// Most DNS queries one [resolve] may send, including those for zone
   /// keys and denial proofs. Cached zone keys cost nothing.
   final int maxQueries;
+
+  /// Most signature verifications one [resolve] may do. With
+  /// [maxKeysPerSignature] and [maxSignaturesPerRRset] this bounds the work
+  /// a zone can cause with colliding key tags and piles of signatures
+  /// (KeyTrap, CVE-2023-50387). Past it the lookup is
+  /// [SecurityStatus.indeterminate].
+  final int maxSignatureChecks;
+
+  /// Keys with the signature's key tag and algorithm tried per signature.
+  /// Honest zones rarely have two; a zone can publish many on purpose.
+  static const maxKeysPerSignature = 4;
+
+  /// Signatures tried per RRset before it counts as unverifiable.
+  static const maxSignaturesPerRRset = 8;
 
   /// Longest one [resolve] may take; after that it is
   /// [SecurityStatus.indeterminate].
@@ -137,9 +155,17 @@ class DnssecValidator {
     // The budget travels in a zone so every query of this lookup draws on
     // it. Zone keys fetched for one lookup and awaited by a concurrent one
     // count against the lookup that started the fetch.
-    final budget = _Budget(maxQueries, timeout);
-    return runZoned(() => _resolve(name, type), zoneValues: {_Budget: budget})
-        .timeout(timeout, onTimeout: () {
+    final budget = _Budget(maxQueries, maxSignatureChecks, timeout);
+    return runZoned(() => _resolve(name, type), zoneValues: {_Budget: budget}).then((answer) {
+      // Answers reached after running out of signature checks may rest on
+      // a verification that was skipped.
+      if (budget.checksExhausted) {
+        return ValidatedAnswer(
+            name: name, type: type, status: SecurityStatus.indeterminate,
+            reason: budget.checksReason, aliases: answer.aliases);
+      }
+      return answer;
+    }).timeout(timeout, onTimeout: () {
       budget.expire();
       return ValidatedAnswer(
           name: name, type: type, status: SecurityStatus.indeterminate,
@@ -231,12 +257,16 @@ class DnssecValidator {
     }
   }
 
-  static List<ResourceRecord> _rrset(
-          List<ResourceRecord> section, DnsName name, int type) =>
-      [
-        for (final rr in section)
-          if (rr.type == type && rr.cls == DnsClass.internet && rr.name == name) rr,
-      ];
+  /// The records of [type] at [name], without duplicates (RFC 2181 §5).
+  static List<ResourceRecord> _rrset(List<ResourceRecord> section, DnsName name, int type) {
+    final out = <ResourceRecord>[];
+    for (final rr in section) {
+      if (rr.type != type || rr.cls != DnsClass.internet || rr.name != name) continue;
+      final rdata = rr.canonicalRdata;
+      if (!out.any((r) => bytesEqual(r.canonicalRdata, rdata))) out.add(rr);
+    }
+    return out;
+  }
 
   static List<Rrsig> _sigs(List<ResourceRecord> section, DnsName name, int type) {
     final out = <Rrsig>[];
@@ -476,6 +506,17 @@ class DnssecValidator {
   }
 
   Future<_ZoneKeys> _fetchKeys(DnsName zone) async {
+    final keys = await _fetchKeysUnbounded(zone);
+    // A failure caused by this lookup's budget says nothing about the zone,
+    // and another lookup may be awaiting the same keys.
+    final budget = Zone.current[_Budget] as _Budget?;
+    if (budget != null && budget.checksExhausted && keys.status != SecurityStatus.secure) {
+      return _ZoneKeys.fail(SecurityStatus.indeterminate, budget.checksReason);
+    }
+    return keys;
+  }
+
+  Future<_ZoneKeys> _fetchKeysUnbounded(DnsName zone) async {
     List<Ds> dsSet;
     if (zone.isRoot) {
       dsSet = trustAnchors;
@@ -577,6 +618,8 @@ class DnssecValidator {
     if (rrset.isEmpty) return null;
     final owner = rrset.first.name;
     final now = _now;
+    final budget = Zone.current[_Budget] as _Budget?;
+    var signaturesTried = 0;
     for (final sig in sigs) {
       if (sig.signer != zone ||
           sig.typeCovered != rrset.first.type ||
@@ -585,9 +628,15 @@ class DnssecValidator {
           !_algorithms.contains(sig.algorithm)) {
         continue;
       }
+      final candidates = [
+        for (final key in keys)
+          if (key.keyTag == sig.keyTag && key.algorithm == sig.algorithm) key,
+      ].take(maxKeysPerSignature);
+      if (candidates.isEmpty) continue;
+      if (++signaturesTried > maxSignaturesPerRRset) return null;
       final data = _signedData(rrset, sig);
-      for (final key in keys) {
-        if (key.keyTag != sig.keyTag || key.algorithm != sig.algorithm) continue;
+      for (final key in candidates) {
+        if (budget != null && !budget.spendCheck()) return null;
         if (verifySignature(sig.algorithm, key.publicKey, data, sig.signature)) {
           return sig;
         }
@@ -629,14 +678,23 @@ class DnssecValidator {
 
 /// What one [DnssecValidator.resolve] may still spend.
 class _Budget {
-  _Budget(this.maxQueries, this.timeout)
+  _Budget(this.maxQueries, this.maxChecks, this.timeout)
       : _queriesLeft = maxQueries,
         _watch = Stopwatch()..start();
 
   final int maxQueries;
+  final int maxChecks;
   final Duration timeout;
   final Stopwatch _watch;
   int _queriesLeft;
+  int checksUsed = 0;
+
+  bool get checksExhausted => checksUsed > maxChecks;
+
+  String get checksReason => 'Lookup needed more than $maxChecks signature checks';
+
+  /// Spends one signature verification; false when none are left.
+  bool spendCheck() => ++checksUsed <= maxChecks;
 
   Duration get remaining => timeout - _watch.elapsed;
 
@@ -647,6 +705,7 @@ class _Budget {
   /// Spends one query, or says why there is none left.
   String? take() {
     if (_queriesLeft < 0 || remaining <= Duration.zero) return timeoutReason;
+    if (checksExhausted) return checksReason;
     if (_queriesLeft == 0) return 'Lookup needed more than $maxQueries DNS queries';
     _queriesLeft--;
     return null;

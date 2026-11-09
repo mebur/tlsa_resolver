@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart' as hash;
 import 'package:ed25519_edwards/ed25519_edwards.dart' as ed25519;
+import 'package:pointycastle/ecc/ecc_fp.dart' as fp;
 import 'package:pointycastle/export.dart';
 
 import '../wire/name.dart';
@@ -98,6 +99,15 @@ BigInt _unsigned(List<int> bytes) {
   return v;
 }
 
+/// RFC 3110 §2 limits DNSSEC RSA moduli to 512–4096 bits. Larger keys
+/// would only make each verification slower.
+const _maxRsaModulusBits = 4096;
+const _minRsaModulusBits = 512;
+
+/// Public exponents in use are 3 and 65537; a huge one makes verification
+/// as slow as a private-key operation.
+const _maxRsaExponentBytes = 8;
+
 /// RSA/SHA-x PKCS#1 v1.5 with the RFC 3110 key format: exponent length (one
 /// byte, or zero followed by two bytes), exponent, modulus.
 bool _rsa(Digest digest, String digestInfo, Uint8List key, Uint8List data,
@@ -110,9 +120,14 @@ bool _rsa(Digest digest, String digestInfo, Uint8List key, Uint8List data,
     expLength = (key[1] << 8) | key[2];
     pos = 3;
   }
-  if (expLength == 0 || pos + expLength >= key.length) return false;
+  if (expLength == 0 || expLength > _maxRsaExponentBytes || pos + expLength >= key.length) {
+    return false;
+  }
   final exponent = _unsigned(key.sublist(pos, pos + expLength));
   final modulus = _unsigned(key.sublist(pos + expLength));
+  if (modulus.bitLength > _maxRsaModulusBits || modulus.bitLength < _minRsaModulusBits) {
+    return false;
+  }
   final signer = RSASigner(digest, digestInfo)
     ..init(false, PublicKeyParameter<RSAPublicKey>(RSAPublicKey(modulus, exponent)));
   return signer.verifySignature(data, RSASignature(signature));
@@ -122,14 +137,25 @@ bool _rsa(Digest digest, String digestInfo, Uint8List key, Uint8List data,
 bool _ecdsa(ECDomainParameters curve, Digest digest, int size, Uint8List key,
     Uint8List data, Uint8List signature) {
   if (key.length != size * 2 || signature.length != size * 2) return false;
-  final point = curve.curve.createPoint(
-      _unsigned(key.sublist(0, size)), _unsigned(key.sublist(size)));
+  final x = _unsigned(key.sublist(0, size)), y = _unsigned(key.sublist(size));
+  if (!_onCurve(curve, x, y)) return false;
+  final point = curve.curve.createPoint(x, y);
   final signer = ECDSASigner(digest)
     ..init(false, PublicKeyParameter<ECPublicKey>(ECPublicKey(point, curve)));
   return signer.verifySignature(
       data,
       ECSignature(_unsigned(signature.sublist(0, size)),
           _unsigned(signature.sublist(size))));
+}
+
+/// Whether (x, y) is a point of [curve]: y² = x³ + ax + b (mod p). The
+/// library does not check this when it builds a public key.
+bool _onCurve(ECDomainParameters curve, BigInt x, BigInt y) {
+  final c = curve.curve as fp.ECCurve;
+  final p = c.q!;
+  if (x >= p || y >= p) return false;
+  final a = c.a!.toBigInteger()!, b = c.b!.toBigInteger()!;
+  return (y * y - (x * x * x + a * x + b)) % p == BigInt.zero;
 }
 
 /// NSEC3 owner hash (RFC 5155 §5): iterated SHA-1 over the canonical name.

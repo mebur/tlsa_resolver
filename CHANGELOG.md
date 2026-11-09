@@ -11,3 +11,9 @@
   (RFC 4509 §3).
 * Each lookup is bounded by `maxQueries` (default 64) and `timeout`
   (default 20 s).
+* Bounded signature work per lookup against KeyTrap (CVE-2023-50387):
+  `maxSignatureChecks`, and caps on keys per signature and signatures per
+  RRset.
+* RSA keys limited to 512–4096 bits with exponents of at most 8 bytes;
+  ECDSA keys must lie on the curve.
+* Duplicate records are removed from RRsets (RFC 2181 §5).

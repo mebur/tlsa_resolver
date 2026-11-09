@@ -84,6 +84,11 @@ signed name come back `bogus`, which is the safe failure.
 * CNAME chains (every link is validated; the result is the weakest link) and
   CNAMEs synthesised from signed DNAMEs.
 * NSEC3 with more than 150 iterations is treated as insecure (RFC 9276).
+* Bounded work per lookup against KeyTrap-style attacks (CVE-2023-50387):
+  at most 4 keys tried per signature, 8 signatures per RRset and
+  `maxSignatureChecks` (default 64) verifications per lookup. RSA keys must
+  be 512–4096 bits (RFC 3110) with an exponent of at most 8 bytes, and
+  ECDSA keys must be points on the curve.
 * Each lookup is capped at `maxQueries` DNS queries (default 64) and
   `timeout` (default 20 s), including the queries for zone keys and proofs;
   past either it is `indeterminate`. A resolver cannot keep a lookup busy
@@ -143,6 +148,20 @@ It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed
 in the tool with their reason; currently that is only Ed448 (algorithm 16),
 which this package does not support. CI runs it on every push and weekly.
+
+### Crypto test vectors and fuzzing
+
+`test/wycheproof_test.dart` runs Project Wycheproof's Ed25519, ECDSA and
+RSA PKCS#1 signature vectors (vendored in `test/wycheproof/`) through the
+signature checks. `test/fuzz_test.dart` corrupts responses on the way to
+the validator (bit flips, truncation, dropped, duplicated and moved records,
+replayed signed records, forged denials) and checks that a lookup never
+throws and never comes out secure with anything but the untampered answer.
+
+```sh
+FUZZ_ITERATIONS=100000 dart test test/fuzz_test.dart   # longer run
+FUZZ_SEED=1234 dart test test/fuzz_test.dart           # replay a failure
+```
 
 `device_test/` is a Flutter app that runs a live test suite on a phone or
 tablet; see its README.

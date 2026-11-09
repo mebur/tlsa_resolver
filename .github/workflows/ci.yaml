@@ -20,6 +20,9 @@ jobs:
       - run: flutter pub get
       - run: dart analyze lib test tool hook
       - run: dart test -x network
+        env:
+          # The weekly run fuzzes the validator much longer.
+          FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '200000' || '5000' }}
 
   differential:
     # Compares the validator with Unbound on ~750 live lookups; see

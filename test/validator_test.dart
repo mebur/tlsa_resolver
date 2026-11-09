@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:tlsa_resolver/src/dnssec/crypto.dart';
 import 'package:tlsa_resolver/src/wire/message.dart';
+import 'package:tlsa_resolver/src/wire/rdata.dart';
 import 'package:tlsa_resolver/tlsa_resolver.dart';
 
 import 'support/fake_dns.dart';
@@ -369,6 +371,70 @@ void main() {
       final result = await validator.resolve(n(name), RRType.tlsa);
       expect(result.status, SecurityStatus.indeterminate);
       expect(watch.elapsed, lessThan(const Duration(seconds: 1)));
+    });
+  });
+
+  group('KeyTrap limits', () {
+    const name = '_443._tcp.www.example.test.';
+
+    /// A DNSKEY of example.test with key tag [tag]: random key bytes with
+    /// the last two chosen to hit the tag.
+    ResourceRecord collidingKey(int tag, Random rnd) {
+      final rdata = [0x01, 0x00, 3, 15, for (var i = 0; i < 32; i++) rnd.nextInt(256)];
+      for (var last = 0; last < 0x10000; last++) {
+        rdata[34] = last >> 8;
+        rdata[35] = last & 0xff;
+        final key = rr(n('example.test.'), RRType.dnskey, rdata);
+        if (Dnskey.fromRecord(key).keyTag == tag) return key;
+      }
+      throw StateError('unreachable');
+    }
+
+    /// example.test publishes [keys] keys sharing its real key's tag, and
+    /// the TLSA RRset carries [sigs] signatures claiming that tag, none
+    /// valid. Unbounded, that is keys × sigs verifications.
+    void publishTrap({required int keys, required int sigs}) {
+      final rnd = Random(7);
+      final tag = h.example.keyTag;
+      final fakes = [for (var i = 0; i < keys; i++) collidingKey(tag, rnd)];
+      h.dns.on('example.test.', RRType.dnskey,
+          FakeResponse(answers: h.example.signed_([...fakes, h.example.dnskey])));
+      final real = h.example.sign([tlsa(name)]);
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+        tlsa(name),
+        for (var i = 0; i < sigs; i++)
+          rr(real.name, RRType.rrsig, [...real.rdata.sublist(0, real.rdata.length - 1), i]),
+      ]));
+    }
+
+    TlsaResolver resolver({required int maxSignatureChecks}) => TlsaResolver(
+        validator: DnssecValidator(h.dns,
+            trustAnchors: [h.root.dsValue], clock: () => testNow,
+            maxSignatureChecks: maxSignatureChecks));
+
+    test('colliding key tags and piles of signatures cost a bounded number of checks', () async {
+      publishTrap(keys: 30, sigs: 30);
+      // 900 checks unbounded; at most 8 signatures × 4 keys plus the chain.
+      final result = await resolver(maxSignatureChecks: 40).lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus, reason: result.reason);
+      expect(result.reason, contains('No valid signature'));
+    });
+
+    test('running out of signature checks is indeterminate', () async {
+      publishTrap(keys: 30, sigs: 30);
+      final result = await resolver(maxSignatureChecks: 3).lookupName(n(name));
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(result.reason, contains('more than 3 signature checks'));
+    });
+
+    test('a key-tag collision with the real key still validates', () async {
+      // One honest collision: the real key comes after a colliding one.
+      final fake = collidingKey(h.example.keyTag, Random(3));
+      h.dns.on('example.test.', RRType.dnskey,
+          FakeResponse(answers: h.example.signed_([fake, h.example.dnskey])));
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
     });
   });
 }
