@@ -15,7 +15,8 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 /// Both sides use the same root trust anchors. A disagreement is retried
 /// once, to rule out a zone changing between the two lookups. Exit code 1
 /// means at least one unexplained disagreement (with --strict, also ones
-/// where a side got no answer).
+/// where a side got no answer); 2 means no disagreement, but too many
+/// lookups went unanswered for the run to count (see [maxUnanswered]).
 Future<void> main(List<String> args) async {
   DnsTransport transport = DirectDnsTransport(InternetAddress('9.9.9.9'));
   var transportLabel = '9.9.9.9';
@@ -118,7 +119,8 @@ Future<void> main(List<String> args) async {
         'side (limit ${(maxUnanswered * 100).round()}%). The network or a resolver is failing; '
         'this says nothing about the validator.');
   }
-  exit(failing.isEmpty && !unreliable ? 0 : 1);
+  // 1: a real disagreement. 2: only unreliable, worth retrying later.
+  exit(failing.isNotEmpty ? 1 : (unreliable ? 2 : 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -325,9 +327,23 @@ class _Unbound {
       }
     }
     if (!tagged) status = SecurityStatus.indeterminate;
+    // Unbound reports a chain it could not fetch as bogus; that is its own
+    // network failing, not a validation result.
+    if (status == SecurityStatus.bogus &&
+        detail != null &&
+        _unboundNetworkFailures.any(detail.contains)) {
+      status = SecurityStatus.indeterminate;
+    }
     return _Outcome(status, nxDomain: nx, records: records, canonicalName: canonical, tlsa: tlsa, detail: detail, mxHosts: mx);
   }
 }
+
+/// Phrases in Unbound's validation failures that mean it could not reach
+/// the servers it needed.
+const _unboundNetworkFailures = [
+  'exceeded the maximum number of sends',
+  'no server to query',
+];
 
 int _rank(SecurityStatus s) => switch (s) {
       SecurityStatus.secure => 0,

@@ -51,7 +51,18 @@ jobs:
           channel: stable
       - run: sudo apt-get update && sudo apt-get install -y unbound-host
       - run: flutter pub get
-      - run: dart run tool/differential.dart --server 9.9.9.9
+      # Exit code 2 is a run spoiled by the network (too many unanswered
+      # lookups); it is retried once. A real disagreement (1) fails at once.
+      - name: Compare with Unbound
+        run: |
+          for attempt in 1 2; do
+            code=0
+            dart run tool/differential.dart --server 9.9.9.9 || code=$?
+            if [ "$code" -ne 2 ]; then exit "$code"; fi
+            echo "::warning::Differential run $attempt was unreliable (network); retrying"
+            sleep 60
+          done
+          exit 2
 
   native:
     # The C shim on its own, with -Werror and the address and undefined
