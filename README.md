@@ -60,8 +60,8 @@ has **not been independently audited**. In its place:
 * A fuzz test corrupts resolver responses and checks that no tampered
   answer is ever reported as secure.
 * The live suite in `device_test/` passes on an iPhone (iOS 27) over Wi-Fi
-  and mobile data, and on a Pixel 6a (Android 17), through the system
-  resolver and DNS over HTTPS.
+  and mobile data, and on a Pixel 6a (Android 17) over mobile data, through
+  the system resolver and DNS over HTTPS.
 
 Known limits:
 
