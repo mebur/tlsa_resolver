@@ -1,3 +1,8 @@
+## 0.1.1
+
+* Allows code_assets 2.x (now `^2.2.0`) and requires native_toolchain_c
+  0.19.6 or later for the build hook. No change at run time.
+
 ## 0.1.0
 
 * TLSA lookups through the system resolver (Android 10+, iOS, macOS, Linux)
