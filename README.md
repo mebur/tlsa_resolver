@@ -72,6 +72,13 @@ has **not been independently audited**. In its place:
   and weekly. The only difference is Ed448 (see below).
 * A fuzz test corrupts resolver responses and checks that no tampered
   answer is ever reported as secure.
+* CI holds the validation code to at least 95% line coverage, and a weekly
+  job plants about 30 bugs, one at a time, in the checks that keep forged
+  data out (a skipped signature check, a denial accepted without its
+  proof, a DANE-TA match reported as verified, ...) and fails unless the
+  tests catch every one.
+* A CI job compares the built-in root trust anchors with IANA's list, so a
+  root key rollover or revocation is noticed when it is announced.
 * The live suite in `device_test/` passes on an iPhone (iOS 27) over Wi-Fi
   and mobile data, and on a Pixel 6a (Android 17) over mobile data, through
   the system resolver and DNS over HTTPS.
@@ -245,7 +252,16 @@ takes an explicit owner name such as `_25._tcp.mail.example.com`.
 dart test                 # unit tests + live DNS tests
 dart test -x network      # offline only
 dart run tool/probe.dart _25._tcp.mail.ietf.org
+
+flutter test --coverage -x network && dart run tool/coverage.dart
+dart run tool/mutants.dart          # plant bugs, expect the tests to fail
+dart run tool/root_anchors.dart     # built-in anchors against IANA's list
 ```
+
+Releases are published to pub.dev by `.github/workflows/publish.yaml` when
+a tag `vX.Y.Z` matching the pubspec version (with a CHANGELOG entry) is
+pushed. It authenticates with GitHub's OIDC token, so no pub.dev
+credential is stored anywhere, and it runs the tests before publishing.
 
 ### Differential testing against Unbound
 

@@ -42,11 +42,12 @@ List<int> typeBitmap(Iterable<int> types) {
 
 /// A signed (or unsigned) zone with one Ed25519 key.
 class Zone {
-  Zone(String apex, {this.signed = true}) : apex = n(apex) {
+  /// [flags] defaults to 257 (ZONE|SEP); add 0x80 for a revoked key.
+  Zone(String apex, {this.signed = true, int flags = 257}) : apex = n(apex) {
     final pair = ed.generateKey();
     _private = pair.privateKey;
     final pub = Uint8List.fromList(pair.publicKey.bytes);
-    dnskey = rr(this.apex, RRType.dnskey, [0x01, 0x01, 3, 15, ...pub]); // 257 = ZONE|SEP
+    dnskey = rr(this.apex, RRType.dnskey, [flags >> 8, flags & 0xff, 3, 15, ...pub]);
   }
 
   final DnsName apex;

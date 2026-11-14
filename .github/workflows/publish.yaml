@@ -1,0 +1,47 @@
+name: Publish
+
+# Publishes to pub.dev when a version tag such as v0.2.0 is pushed, using
+# GitHub's OIDC token instead of a stored credential (pub.dev "automated
+# publishing"). On pub.dev, the package's Admin page must allow publishing
+# from this repository with the tag pattern v{{version}}, and should
+# require the "pub.dev" environment, which can be set to need an approval.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write # the token pub.dev checks
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Provisions the OIDC token for pub.dev; its dart is then shadowed by
+      # Flutter's, which publishing needs (example/ is a Flutter app).
+      - uses: dart-lang/setup-dart@6afc89df92d6eb3834022f73cd65adc8cdfcb92d # v1.8.1
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - name: Tag matches pubspec version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version: *//p' pubspec.yaml)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match pubspec version $version"
+            exit 1
+          fi
+          grep -q "^## $version\$" CHANGELOG.md || { echo "::error::No CHANGELOG entry for $version"; exit 1; }
+      - run: flutter pub get
+      - run: dart analyze lib test tool hook
+      - run: dart test -x network
+      - run: flutter pub publish --dry-run
+      - run: flutter pub publish --force

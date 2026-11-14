@@ -32,10 +32,29 @@ jobs:
           channel: stable
       - run: flutter pub get
       - run: dart analyze lib test tool hook
-      - run: dart test -x network
+      - run: flutter test --coverage -x network
         env:
           # The weekly run fuzzes the validator much longer.
           FUZZ_ITERATIONS: ${{ github.event_name == 'schedule' && '200000' || '5000' }}
+      # Lists untested lines per file; fails if the validation code drops
+      # below its floor (tool/coverage.dart).
+      - run: dart run tool/coverage.dart
+
+  mutants:
+    # Plants each of ~30 bugs in the security checks and expects the tests
+    # to catch every one (tool/mutants.dart). Weekly, as it takes minutes.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - run: flutter pub get
+      - run: dart run tool/mutants.dart
 
   differential:
     # Compares the validator with Unbound on ~750 live lookups; see
@@ -63,6 +82,30 @@ jobs:
             sleep 60
           done
           exit 2
+
+  root-anchors:
+    # The built-in root trust anchors against IANA's list, so a root key
+    # rollover or revocation fails a (weekly) run; see tool/root_anchors.dart.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+      - run: flutter pub get
+      # Exit code 2 is a fetch that failed; it warns instead of failing.
+      - name: Compare with IANA
+        run: |
+          code=0
+          dart run tool/root_anchors.dart || code=$?
+          if [ "$code" -eq 2 ]; then
+            echo "::warning::Could not fetch IANA's root anchors"
+            exit 0
+          fi
+          exit "$code"
 
   native:
     # The C shim on its own, with -Werror and the address and undefined

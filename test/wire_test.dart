@@ -72,6 +72,17 @@ void main() {
       final bytes = <int>[0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0, 0xc0, 12, 0, 1, 0, 1];
       expect(() => DnsMessage.parse(Uint8List.fromList(bytes)), throwsFormatException);
     });
+
+    test('rejects compression pointers that point forward', () {
+      // The question name points past itself, to a name after the question.
+      // Only pointers to earlier names are allowed, which also rules out loops.
+      final bytes = <int>[
+        0, 1, 0x81, 0x80, 0, 1, 0, 0, 0, 0, 0, 0,
+        0xc0, 18, 0, 1, 0, 1, // @12
+        3, ...ascii.encode('com'), 0, // @18
+      ];
+      expect(() => DnsMessage.parse(Uint8List.fromList(bytes)), throwsFormatException);
+    });
   });
 
   group('DNSSEC primitives', () {

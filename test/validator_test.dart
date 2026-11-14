@@ -828,6 +828,275 @@ void main() {
       expect(result.status, SecurityStatus.secure, reason: result.reason);
     });
   });
+
+  group('aliases', () {
+    const name = '_443._tcp.www.example.test.';
+    ResourceRecord cname(String owner, String target) =>
+        rr(n(owner), RRType.cname, n(target).toWire());
+
+    test('several CNAMEs at one name are bogus', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([
+        cname(name, 'a.example.test.'),
+        cname(name, 'b.example.test.'),
+      ])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.error, ValidationError.invalidData);
+    });
+
+    group('a CNAME synthesised from a DNAME (RFC 6672)', () {
+      const target = '_443._tcp.www2.example.test.';
+      final dname = rr(n('www.example.test.'), RRType.dname, n('www2.example.test.').toWire());
+
+      setUp(() => h.dns.on(target, RRType.tlsa,
+          FakeResponse(answers: h.example.signed_([tlsa(target)]))));
+
+      test('is trusted when the signed DNAME produces it', () async {
+        h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+          ...h.example.signed_([dname]),
+          cname(name, target), // synthesised, so unsigned
+        ]));
+        final result = await h.resolver().lookupName(n(name));
+        expect(result.status, SecurityStatus.secure, reason: result.reason);
+        expect(result.answer.canonicalName, n(target));
+      });
+
+      test('is bogus when it points somewhere the DNAME does not', () async {
+        h.dns.on(name, RRType.tlsa, FakeResponse(answers: [
+          ...h.example.signed_([dname]),
+          cname(name, '_443._tcp.evil.example.test.'),
+        ]));
+        final result = await h.resolver().lookupName(n(name));
+        expect(result.status, SecurityStatus.bogus);
+        expect(result.error, ValidationError.rrsigsMissing);
+      });
+    });
+
+    test('a CNAME where a zone cut should be is bogus', () async {
+      const name = '_443._tcp.www.broken.test.';
+      h.dns.on('broken.test.', RRType.ds,
+          FakeResponse(answers: h.test.signed_([cname('broken.test.', 'example.test.')])));
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.broken.signed_([tlsa(name)])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('CNAME at zone cut'));
+    });
+  });
+
+  group('responses that do not fit', () {
+    const name = '_443._tcp.www.example.test.';
+
+    setUp(() => h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)]))));
+
+    Future<TlsaResult> through(void Function(Uint8List response) tamper) =>
+        TlsaResolver(validator: DnssecValidator(_Rewriting(h.dns, tamper),
+            trustAnchors: [h.root.dsValue], clock: () => testNow)).lookupName(n(name));
+
+    for (final (what, tamper) in [
+      ('another query ID', (Uint8List r) => r[1] ^= 1),
+      // _443 -> _543, in the TLSA response only (byte 14 of others is not
+      // in the name).
+      ('another question name', (Uint8List r) {
+        if (DnsMessage.parse(r).questions.single.type == RRType.tlsa) r[14] ^= 1;
+      }),
+      ('the QR bit clear (not a response)', (Uint8List r) => r[2] &= 0x7f),
+    ]) {
+      test('a response with $what is refused', () async {
+        final result = await through(tamper);
+        expect(result.status, SecurityStatus.indeterminate);
+        expect(result.error, ValidationError.invalidData);
+        expect(result.reason, contains('does not match'));
+      });
+    }
+
+    test('a truncated response is refused', () async {
+      final result = await through((r) => r[2] |= 0x02);
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(result.reason, contains('Truncated'));
+    });
+
+    test('a signature by a zone that is not an ancestor is bogus', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [tlsa(name), h.nsec3.sign([tlsa(name)])]));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('not an ancestor'));
+    });
+
+    test('a CNAME chain longer than maxAliases is cut off', () async {
+      for (var i = 0; i < 9; i++) {
+        final from = i == 0 ? '_443._tcp.chain.example.test.' : 'c$i.example.test.';
+        h.dns.on(from, RRType.tlsa, FakeResponse(answers: h.example.signed_([
+          rr(n(from), RRType.cname, n('c${i + 1}.example.test.').toWire()),
+        ])));
+      }
+      final result = await h.resolver().lookupName(n('_443._tcp.chain.example.test.'));
+      expect(result.status, SecurityStatus.indeterminate);
+      expect(result.error, ValidationError.limitExceeded);
+      expect(result.reason, contains('More than 8 CNAMEs'));
+    });
+  });
+
+  group('forgeries the checks exist for', () {
+    const name = '_443._tcp.www.example.test.';
+
+    test('an RRSIG claiming more labels than its owner has is not used', () async {
+      // Labels 6 for a 5-label owner: no such signature can be valid.
+      h.dns.on(name, RRType.tlsa,
+          FakeResponse(answers: [tlsa(name), h.example.sign([tlsa(name)], labels: 6)]));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+    });
+
+    test('a revoked key (RFC 5011) vouches for nothing', () async {
+      final revoked = Zone('example.test.', flags: 257 | 0x80);
+      h.dns.on('example.test.', RRType.ds, FakeResponse(answers: h.test.signed_([revoked.ds])));
+      h.dns.on('example.test.', RRType.dnskey,
+          FakeResponse(answers: revoked.signed_([revoked.dnskey])));
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: revoked.signed_([tlsa(name)])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.error, ValidationError.dnskeyMissing);
+    });
+
+    test('a signature by a zone that does not exist is bogus, not insecure', () async {
+      // The forger signs with a "zone" at www.example.test and shows the
+      // real proof that the name does not exist: no DS there must not read
+      // as an unsigned delegation.
+      final fake = Zone('www.example.test.');
+      h.dns.on('www.example.test.', RRType.ds, FakeResponse(rcode: Rcode.nxDomain, authority: [
+        ...h.example.signed_([h.example.soa]),
+        ...h.example.signed_([
+          h.example.nsec('example.test.', 'zzz.example.test.', {RRType.soa, RRType.ns, RRType.dnskey}),
+        ]),
+      ]));
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: fake.signed_([tlsa(name)])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus, reason: result.reason);
+      expect(result.reason, contains('does not exist'));
+    });
+
+    test("a parent's NSEC at a delegation cannot deny names in the child", () async {
+      // sub.example.test is delegated; the parent's NSEC there covers
+      // everything below it in canonical order, but speaks only for the
+      // parent.
+      const below = '_443._tcp.www.sub.example.test.';
+      h.dns.on(below, RRType.tlsa, FakeResponse(rcode: Rcode.nxDomain, authority: [
+        ...h.example.signed_([h.example.soa]),
+        ...h.example.signed_([h.example.nsec('sub.example.test.', 'zzz.example.test.', {RRType.ns})]),
+      ]));
+      final result = await h.resolver().lookupName(n(below));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.error, ValidationError.nsecMissing);
+    });
+  });
+
+  group('less common proofs', () {
+    test('a zone whose DS only uses unsupported algorithms is insecure', () async {
+      const name = '_443._tcp.www.broken.test.';
+      h.dns.on('broken.test.', RRType.ds,
+          FakeResponse(answers: h.test.signed_([h.broken.dsWith(algorithm: 16)]))); // Ed448
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.broken.signed_([tlsa(name)])));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.insecure, reason: result.reason);
+      expect(result.error, ValidationError.unsupportedAlgorithm);
+      expect(result.daneApplies, isFalse);
+    });
+
+    test('NSEC wildcard NODATA: the name comes from a wildcard without the type', () async {
+      const name = '_443._tcp.www.example.test.';
+      h.dns.on(name, RRType.tlsa, FakeResponse(authority: [
+        ...h.example.signed_([h.example.soa]),
+        // Covers the name, and is itself *.www, which has no TLSA.
+        ...h.example.signed_([h.example.nsec('*.www.example.test.', 'zzz.example.test.', {RRType.a})]),
+      ]));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.secure, reason: result.reason);
+      expect(result.records, isEmpty);
+    });
+
+    group('NSEC3', () {
+      const name = '_443._tcp.www.nsec3.test.';
+      const apex = {RRType.soa, RRType.ns, RRType.dnskey};
+
+      test('wildcard NODATA', () async {
+        final chain = h.nsec3.nsec3Chain({
+          'nsec3.test.': apex,
+          'www.nsec3.test.': {RRType.a},
+          '*.www.nsec3.test.': {RRType.a},
+        });
+        h.dns.on(name, RRType.tlsa, FakeResponse(authority: [
+          ...h.nsec3.signed_([h.nsec3.soa]),
+          for (final r in chain) ...h.nsec3.signed_([r]),
+        ]));
+        final result = await h.resolver().lookupName(n(name));
+        expect(result.status, SecurityStatus.secure, reason: result.reason);
+        expect(result.records, isEmpty);
+      });
+
+      group('wildcard expansion', () {
+        final names = {
+          'nsec3.test.': apex,
+          'www.nsec3.test.': {RRType.a},
+          '_tcp.www.nsec3.test.': <int>{},
+          '*._tcp.www.nsec3.test.': {RRType.tlsa},
+        };
+        void answer(List<ResourceRecord> authority) {
+          final expanded = tlsa(name);
+          h.dns.on(name, RRType.tlsa, FakeResponse(
+              answers: [expanded, h.nsec3.sign([expanded], labels: 4)], // from *._tcp.www
+              authority: [for (final r in authority) ...h.nsec3.signed_([r])]));
+        }
+
+        test('is secure with the next closer name covered', () async {
+          answer(h.nsec3.nsec3Chain(names));
+          final result = await h.resolver().lookupName(n(name));
+          expect(result.status, SecurityStatus.secure, reason: result.reason);
+          expect(result.records, hasLength(1));
+        });
+
+        test('is bogus without that proof', () async {
+          answer([]);
+          final result = await h.resolver().lookupName(n(name));
+          expect(result.status, SecurityStatus.bogus);
+          expect(result.reason, contains('Wildcard answer'));
+        });
+
+        test('is insecure when the proof is an opt-out span', () async {
+          answer(h.nsec3.nsec3Chain(names, optOut: true));
+          final result = await h.resolver().lookupName(n(name));
+          expect(result.status, SecurityStatus.insecure, reason: result.reason);
+          expect(result.reason, contains('opt-out'));
+        });
+      });
+
+      group('no DS at a child', () {
+        const child = 'u.nsec3.test.', name = '_443._tcp.www.u.nsec3.test.';
+
+        void delegation(Set<int> types) {
+          final chain = h.nsec3.nsec3Chain({'nsec3.test.': apex, child: types});
+          h.dns.on(child, RRType.ds, FakeResponse(authority: [
+            ...h.nsec3.signed_([h.nsec3.soa]),
+            for (final r in chain) ...h.nsec3.signed_([r]),
+          ]));
+          h.dns.on(child, RRType.soa, FakeResponse(answers: [Zone(child, signed: false).soa]));
+          h.dns.on(name, RRType.tlsa, FakeResponse(answers: [tlsa(name)]));
+        }
+
+        test('proves an unsigned delegation when the NSEC3 shows NS', () async {
+          delegation({RRType.ns});
+          final result = await h.resolver().lookupName(n(name));
+          expect(result.status, SecurityStatus.insecure, reason: result.reason);
+          expect(result.records, hasLength(1));
+        });
+
+        test('proves nothing when the name is not a delegation', () async {
+          delegation({RRType.a});
+          final result = await h.resolver().lookupName(n(name));
+          expect(result.status, SecurityStatus.bogus, reason: result.reason);
+        });
+      });
+    });
+  });
 }
 
 class _FailingTransport implements DnsTransport {
@@ -863,5 +1132,19 @@ class _FailingFor implements DnsTransport {
     final q = DnsMessage.parse(query).questions.single;
     if ((q.name, q.type) == question) throw DnsTransportException('unreachable');
     return inner.send(query);
+  }
+}
+
+/// Passes responses through [tamper] on their way back.
+class _Rewriting implements DnsTransport {
+  _Rewriting(this.inner, this.tamper);
+  final DnsTransport inner;
+  final void Function(Uint8List response) tamper;
+
+  @override
+  Future<Uint8List> send(Uint8List query) async {
+    final response = Uint8List.fromList(await inner.send(query));
+    tamper(response);
+    return response;
   }
 }

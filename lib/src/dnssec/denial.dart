@@ -190,11 +190,14 @@ class Nsec3Prover {
   }
 
   /// §8.8: an answer expanded from a wildcard at the ancestor with
-  /// [rrsigLabels] labels needs the next closer name covered.
+  /// [rrsigLabels] labels needs the next closer name covered. If the
+  /// covering NSEC3 is an opt-out span, the next closer name may be an
+  /// unsigned delegation, whose data the wildcard would not reach, so the
+  /// answer is only insecure (as in Unbound).
   Proof proveWildcardExpansion(DnsName name, int rrsigLabels) {
     if (tooManyIterations) return Proof.tooManyIterations;
-    return _covering(name.suffix(rrsigLabels + 1)) != null
-        ? Proof.proven
-        : Proof.failed;
+    final cover = _covering(name.suffix(rrsigLabels + 1));
+    if (cover == null) return Proof.failed;
+    return cover.optOut ? Proof.optOut : Proof.proven;
   }
 }

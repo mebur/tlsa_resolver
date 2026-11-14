@@ -101,6 +101,24 @@ void main() {
     expect(DaneVerifier.verify(result, [cert], pkixValidated: true).outcome, DaneOutcome.verified);
   });
 
+  test('records compare by value', () {
+    final a = TlsaRecord(3, 1, 1, Uint8List.fromList(_hex(_spkiSha256)));
+    final b = TlsaRecord(3, 1, 1, Uint8List.fromList(_hex(_spkiSha256)));
+    expect(a, b);
+    expect(a.hashCode, b.hashCode);
+    expect({a, b}, hasLength(1));
+    for (final other in [
+      TlsaRecord(2, 1, 1, a.data),
+      TlsaRecord(3, 0, 1, a.data),
+      TlsaRecord(3, 1, 2, a.data),
+      TlsaRecord(3, 1, 1, Uint8List.fromList([...a.data]..[31] ^= 1)),
+      TlsaRecord(3, 1, 1, Uint8List.sublistView(a.data, 1)),
+    ]) {
+      expect(a == other, isFalse, reason: '$other');
+    }
+    expect('$a', startsWith('3 1 1 ${_spkiSha256.substring(0, 8)}'));
+  });
+
   test('unusable records are ignored', () {
     final result = _secureResult([
       TlsaRecord(3, 1, 1, Uint8List(20)), // wrong digest length

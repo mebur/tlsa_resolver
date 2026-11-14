@@ -1,6 +1,9 @@
-## 0.1.2
+## 0.2.0
 
-Fixes from a security review.
+Fixes from a security review. The minor version is raised because the
+DANE-TA change below can turn connections that were accepted into ones that
+are not; callers that only checked `isVerified` should handle
+`DaneOutcome.needsChainCheck`.
 
 * **Breaking:** a DANE-TA (usage 2) match is now
   `DaneOutcome.needsChainCheck` instead of `DaneOutcome.verified`, so
@@ -30,6 +33,9 @@ Fixes from a security review.
   outcome on all 210 Wycheproof Ed25519 vectors and the 12
   ed25519-speccheck edge cases, so an update that changes its behaviour is
   caught.
+* An answer expanded from an NSEC3-signed wildcard whose proof is an
+  opt-out span is now insecure instead of secure (as in Unbound): the
+  name may be an unsigned delegation, which the wildcard does not reach.
 * NSEC3 records whose owner or next hash is not 20 bytes (SHA-1) are
   ignored: a short next hash would cover far more than the zone meant.
 * `lookup` throws an `ArgumentError` for a non-ASCII host or protocol

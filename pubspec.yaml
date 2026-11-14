@@ -1,6 +1,6 @@
 name: tlsa_resolver
 description: "Resolve DNS TLSA records with local DNSSEC validation through the system resolver, and match certificates against them (DANE)."
-version: 0.1.2
+version: 0.2.0
 repository: https://github.com/mebur/tlsa_resolver
 issue_tracker: https://github.com/mebur/tlsa_resolver/issues
 topics: [dns, dnssec, dane, tls, security]
