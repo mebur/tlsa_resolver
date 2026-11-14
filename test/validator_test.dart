@@ -257,6 +257,23 @@ void main() {
       ]));
       expect((await h.resolver().lookupName(n(name))).reason, contains('No valid proof'));
     });
+
+    test('NSEC3 records whose hashes are not 20 bytes are ignored', () async {
+      // The same proof as above, but each next hash cut to 19 bytes: SHA-1
+      // hashes are 20, and a short one would stretch the span it covers.
+      final chain = h.nsec3.nsec3Chain({
+        'nsec3.test.': {RRType.soa, RRType.ns, RRType.dnskey},
+        'www.nsec3.test.': {RRType.a},
+        'mail.nsec3.test.': {RRType.a},
+      }, nextHashLength: 19);
+      h.dns.on(name, RRType.tlsa, FakeResponse(rcode: Rcode.nxDomain, authority: [
+        ...h.nsec3.signed_([h.nsec3.soa]),
+        for (final r in chain) ...h.nsec3.signed_([r]),
+      ]));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('No valid proof'));
+    });
   });
 
   group('CNAME', () {

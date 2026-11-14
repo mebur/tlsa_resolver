@@ -23,6 +23,13 @@ Fixes from a security review.
 * Unsigned data whose zone could not be looked up (no answer, malformed
   response, or a spent budget) is now indeterminate with that error,
   instead of bogus with `rrsigsMissing`.
+* Ed25519 keys of small order are refused. `ed25519_edwards` accepts
+  them, and with one (the identity key, say) a signature verifies for any
+  message. No honestly made key has small order. A new test suite pins the
+  package's outcome on all 210 Wycheproof Ed25519 vectors, so an update
+  that changes its behaviour is caught.
+* NSEC3 records whose owner or next hash is not 20 bytes (SHA-1) are
+  ignored: a short next hash would cover far more than the zone meant.
 * `lookup` throws an `ArgumentError` for a non-ASCII host or protocol
   instead of looking up raw UTF-8, which never exists and made DANE quietly
   not apply. Pass internationalised names in A-label (`xn--`) form.

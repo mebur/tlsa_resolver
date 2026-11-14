@@ -83,12 +83,37 @@ bool verifySignature(int algorithm, Uint8List publicKey, Uint8List data,
         _ecdsa(ECCurve_secp384r1(), SHA384Digest(), 48, publicKey, data, signature),
       DnssecAlgorithm.ed25519 => publicKey.length == 32 &&
           signature.length == 64 &&
+          !_ed25519SmallOrder(publicKey) &&
           ed25519.verify(ed25519.PublicKey(publicKey), data, signature),
       _ => false,
     };
   } catch (_) {
     return false;
   }
+}
+
+/// Encodings of the eight Ed25519 points of small order (the y coordinate,
+/// sign bit cleared), including y = p and y = p + 1, which decode to 0 and
+/// 1. The same list as libsodium's. With such a key, signatures verify for
+/// any message (the identity key accepts R = identity, S = 0 for all), and
+/// ed25519_edwards does not refuse them, so they are refused here. No
+/// honestly made key has small order.
+final _ed25519SmallOrderKeys = [
+  for (final hex in const [
+    '0000000000000000000000000000000000000000000000000000000000000000', // 0, order 4
+    '0100000000000000000000000000000000000000000000000000000000000000', // 1, identity
+    '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05', // order 8
+    'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a', // order 8
+    'ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', // p - 1, order 2
+    'edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', // p, i.e. 0
+    'eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f', // p + 1, i.e. 1
+  ])
+    [for (var i = 0; i < 64; i += 2) int.parse(hex.substring(i, i + 2), radix: 16)],
+];
+
+bool _ed25519SmallOrder(Uint8List key) {
+  final y = [...key.sublist(0, 31), key[31] & 0x7f];
+  return _ed25519SmallOrderKeys.any((k) => bytesEqual(k, y));
 }
 
 BigInt _unsigned(List<int> bytes) {

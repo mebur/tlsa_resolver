@@ -97,13 +97,22 @@ Proof nsecProveWildcardExpansion(
       : Proof.failed;
 }
 
+/// SHA-1, the only NSEC3 hash algorithm, gives 20 bytes.
+const _nsec3HashLength = 20;
+
 /// NSEC3 proofs for one zone (RFC 5155 §8). Records with unknown hash
-/// algorithms or from another zone are ignored.
+/// algorithms, from another zone, or with owner or next hashes that are
+/// not 20 bytes long are ignored: a short next hash would make the record
+/// cover far more than the zone meant it to.
 class Nsec3Prover {
   Nsec3Prover(List<Nsec3> records, this.zone)
       : records = [
           for (final r in records)
-            if (r.hashAlgorithm == 1 && r.zone == zone && r.ownerHash != null) r,
+            if (r.hashAlgorithm == 1 &&
+                r.zone == zone &&
+                r.ownerHash?.length == _nsec3HashLength &&
+                r.nextHash.length == _nsec3HashLength)
+              r,
         ];
 
   final List<Nsec3> records;

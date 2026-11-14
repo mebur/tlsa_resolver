@@ -137,7 +137,7 @@ class Zone {
 
   /// NSEC3 chain for the given names (with their types), sorted by hash.
   List<ResourceRecord> nsec3Chain(Map<String, Set<int>> names,
-      {bool optOut = false, int rounds = iterations}) {
+      {bool optOut = false, int rounds = iterations, int nextHashLength = 20}) {
     final entries = [
       for (final e in names.entries) (nsec3HashOf(e.key, rounds: rounds), e.value),
     ]..sort((a, b) => _cmp(a.$1, b.$1));
@@ -145,7 +145,7 @@ class Zone {
       for (var i = 0; i < entries.length; i++)
         rr(n('${_b32(entries[i].$1)}.$apex'), RRType.nsec3, [
           1, optOut ? 1 : 0, ..._u16(rounds), salt.length, ...salt,
-          20, ...entries[(i + 1) % entries.length].$1,
+          nextHashLength, ...entries[(i + 1) % entries.length].$1.take(nextHashLength),
           ...typeBitmap(entries[i].$2.isEmpty ? <int>{} : {...entries[i].$2, RRType.rrsig}),
         ]),
     ];

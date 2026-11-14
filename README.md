@@ -61,7 +61,10 @@ has **not been independently audited**. In its place:
   tampered signatures, forged denials, stripped records and KeyTrap-style
   key-tag collisions.
 * Project Wycheproof's test vectors check the Ed25519, ECDSA and RSA
-  signature verification.
+  signature verification. All 210 Ed25519 vectors also pin the behaviour
+  of the `ed25519_edwards` package itself, so an update that changes it
+  fails CI. Small-order Ed25519 keys, which that package accepts and which
+  verify any signature, are refused.
 * A differential test compares every answer with Unbound on about 750 live
   lookups across many TLDs, algorithms and denial types, in CI on every push
   and weekly. The only difference is Ed448 (see below).
@@ -83,6 +86,14 @@ Known limits:
   anchor, and the name check, are up to the caller.
 * `lookup` takes ASCII host names only; pass internationalised names in
   their A-label (`xn--`) form.
+* Clock tolerance cuts both ways. Signatures count up to `clockSkew`
+  (default one hour) outside their validity period, so a phone whose clock
+  is a little off still validates; but for that hour an attacker can also
+  replay a signed answer whose signature has just expired, such as a TLSA
+  record the zone has since replaced. Zones re-sign well before expiry, so
+  this only matters for data changed shortly before its old signature ran
+  out. Where the clock is trustworthy (servers with NTP), a few minutes, or
+  `Duration.zero`, closes most of that window.
 
 Please report security problems privately through GitHub's security
 advisories for [mebur/tlsa_resolver](https://github.com/mebur/tlsa_resolver/security/advisories/new),
@@ -279,7 +290,11 @@ mkdir -p build && cc -std=gnu11 -Wall -Wextra -Werror -g -fsanitize=address,unde
 
 `test/wycheproof_test.dart` runs Project Wycheproof's Ed25519, ECDSA and
 RSA PKCS#1 signature vectors (vendored in `test/wycheproof/`) through the
-signature checks. `test/fuzz_test.dart` corrupts responses on the way to
+signature checks. `test/ed25519_test.dart` runs every Ed25519 vector,
+including the ones Wycheproof marks "acceptable", against the
+`ed25519_edwards` package directly and pins its outcomes, so a dependency
+update that changes any of them fails; it also checks that small-order keys
+are refused. `test/fuzz_test.dart` corrupts responses on the way to
 the validator (bit flips, truncation, dropped, duplicated and moved records,
 replayed signed records, forged denials) and checks that a lookup never
 throws and never comes out secure with anything but the untampered answer.
