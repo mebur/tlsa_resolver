@@ -38,6 +38,10 @@ are not; callers that only checked `isVerified` should handle
   name may be an unsigned delegation, which the wildcard does not reach.
 * NSEC3 records whose owner or next hash is not 20 bytes (SHA-1) are
   ignored: a short next hash would cover far more than the zone meant.
+* The README shows how to make a TLS connection with `dart:io` and DANE,
+  and what `dart:io` cannot do (DANE-TA needs the chain, which
+  `SecureSocket` does not expose); `tool/dane_connect.dart` is the same
+  code as a runnable tool.
 * `lookup` throws an `ArgumentError` for a non-ASCII host or protocol
   instead of looking up raw UTF-8, which never exists and made DANE quietly
   not apply. Pass internationalised names in A-label (`xn--`) form.

@@ -246,6 +246,57 @@ takes an explicit owner name such as `_25._tcp.mail.example.com`.
 `DaneVerifier.recordFor(certDer)` computes the record to publish (default
 `3 1 1`).
 
+## TLS connections with dart:io
+
+`SecureSocket` hands over the server's leaf certificate and nothing else of
+the chain, and only lets you overrule ordinary validation through
+`onBadCertificate`. That is enough for **DANE-EE**, the usage almost every
+DANE server publishes (SMTP servers in particular), and for PKIX-EE. It is
+not enough for DANE-TA or PKIX-TA, which need the chain; with `dart:io`,
+servers that publish only those cannot be verified, and the connection
+should be refused rather than let through on ordinary validation alone.
+
+```dart
+Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int port) async {
+  final tlsa = await resolver.lookup(host, port: port);
+  // Bogus or failed: do not fall back to ordinary validation (RFC 7672 §2.2).
+  if (tlsa.isFailure) throw DaneException('TLSA lookup failed: ${tlsa.reason}');
+
+  var pkixValidated = true;
+  final socket = await SecureSocket.connect(host, port, onBadCertificate: (_) {
+    // Ordinary validation failed. Without DANE that is final; with DANE,
+    // finish the handshake and judge the leaf below. (The certificate passed
+    // here is the one that failed, which is not always the leaf.)
+    pkixValidated = false;
+    return tlsa.daneApplies;
+  });
+  if (!tlsa.daneApplies) return socket; // no DANE: ordinary validation decided
+
+  final leaf = socket.peerCertificate;
+  if (leaf != null &&
+      DaneVerifier.verify(tlsa, [leaf.der], pkixValidated: pkixValidated).isVerified) {
+    return socket;
+  }
+  socket.destroy(); // DANE applies and does not match: refuse
+  throw DaneException('certificate matches no TLSA record of $host');
+}
+```
+
+(`DaneException` is an exception class of your own.) A DANE-EE match is
+accepted even when the certificate is self-signed, expired or for another
+name, which is what DANE-EE means (RFC 7671 §5.1). For STARTTLS (SMTP on port 25), do the same with `SecureSocket.secure` on
+the plain socket after the `STARTTLS` exchange.
+
+`tool/dane_connect.dart` is this function as a command-line tool, and
+`test/dane_connect_test.dart` checks it against a local server with a
+self-signed certificate:
+
+```sh
+dart run tool/dane_connect.dart www.freebsd.org        # matches its 3 1 1 record
+dart run tool/dane_connect.dart www.google.com         # no DANE: ordinary validation
+dart run tool/dane_connect.dart www.freebsd.org --connect www.debian.org   # refused
+```
+
 ## Development
 
 ```sh
