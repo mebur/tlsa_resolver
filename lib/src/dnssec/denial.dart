@@ -84,10 +84,18 @@ Proof nsecProveNoData(DnsName name, int type, List<Nsec> nsecs, DnsName zone) {
   return Proof.failed;
 }
 
-/// A positive answer synthesised from a wildcard must come with proof that
-/// [name] itself does not exist (RFC 4035 §5.3.4).
-Proof nsecProveWildcardExpansion(DnsName name, List<Nsec> nsecs) =>
-    _coveringNsec(nsecs, name) != null ? Proof.proven : Proof.failed;
+/// A positive answer synthesised from the wildcard whose parent has
+/// [rrsigLabels] labels must come with proof that [name] does not exist and
+/// that the closest encloser is that parent (RFC 4035 §5.3.4). Otherwise a
+/// wildcard answer could be replayed for a name below an existing one.
+Proof nsecProveWildcardExpansion(
+    DnsName name, int rrsigLabels, List<Nsec> nsecs, DnsName zone) {
+  final cover = _coveringNsec(nsecs, name);
+  if (cover == null) return Proof.failed;
+  return _nsecClosestEncloser(cover, name, zone).labelCount == rrsigLabels
+      ? Proof.proven
+      : Proof.failed;
+}
 
 /// NSEC3 proofs for one zone (RFC 5155 §8). Records with unknown hash
 /// algorithms or from another zone are ignored.

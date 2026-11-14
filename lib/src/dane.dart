@@ -19,6 +19,14 @@ enum DaneOutcome {
   /// A usable record matched and its usage's conditions hold.
   verified,
 
+  /// A DANE-TA(2) record matched [DaneMatch.certificateIndex], but that
+  /// alone proves nothing: trust anchor certificates are public, and anyone
+  /// can send one after a leaf of their own. Accept the connection only
+  /// after checking that the leaf chains up to the matched certificate and
+  /// that the leaf's name matches the service (RFC 7671 §5.2). This library
+  /// does not build or verify X.509 paths.
+  needsChainCheck,
+
   /// DANE applies but no usable record matched: reject the connection.
   mismatch,
 
@@ -38,16 +46,12 @@ class DaneVerdict {
   final DaneMatch? match;
   final String? reason;
 
+  /// Whether the chain is verified without further checks. False for
+  /// [DaneOutcome.needsChainCheck].
   bool get isVerified => outcome == DaneOutcome.verified;
 
-  /// For a DANE-TA(2) match on a certificate other than the leaf, the caller
-  /// still has to check that the leaf chains up to that certificate and that
-  /// the leaf's name matches the service (RFC 7671 §5.2). This library does
-  /// not build or verify X.509 paths.
-  bool get requiresChainCheck =>
-      match != null &&
-      match!.record.usage == TlsaUsage.daneTa &&
-      match!.certificateIndex > 0;
+  /// Whether the outcome is [DaneOutcome.needsChainCheck].
+  bool get requiresChainCheck => outcome == DaneOutcome.needsChainCheck;
 
   @override
   String toString() => 'DaneVerdict(${outcome.name}'
@@ -77,18 +81,29 @@ abstract final class DaneVerifier {
       return DaneVerdict(DaneOutcome.mismatch, reason: 'Empty certificate chain');
     }
 
-    // Prefer DANE-EE, then DANE-TA, then the PKIX usages.
+    // Prefer DANE-EE, then DANE-TA, then the PKIX usages. A DANE-TA match
+    // still needs the caller's checks, so a match that needs none wins.
     final ordered = [...records]..sort((a, b) => _preference(a.usage) - _preference(b.usage));
+    DaneMatch? anchor;
     for (final record in ordered) {
       final needsPkix = record.usage == TlsaUsage.pkixTa || record.usage == TlsaUsage.pkixEe;
       if (needsPkix && !pkixValidated) continue;
+      if (record.usage == TlsaUsage.daneTa && anchor != null) continue;
       final leafOnly = record.usage == TlsaUsage.daneEe || record.usage == TlsaUsage.pkixEe;
       final candidates = leafOnly ? 1 : chain.length;
       for (var i = 0; i < candidates; i++) {
-        if (matches(record, chain[i])) {
+        if (!matches(record, chain[i])) continue;
+        if (record.usage != TlsaUsage.daneTa) {
           return DaneVerdict(DaneOutcome.verified, match: DaneMatch(record, i));
         }
+        anchor = DaneMatch(record, i);
+        break;
       }
+    }
+    if (anchor != null) {
+      return DaneVerdict(DaneOutcome.needsChainCheck, match: anchor,
+          reason: 'DANE-TA matched certificate ${anchor.certificateIndex}; '
+              'the leaf must chain to it and match the service name');
     }
     return DaneVerdict(DaneOutcome.mismatch,
         reason: 'No TLSA record matches the presented chain');

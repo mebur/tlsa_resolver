@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:math';
 import 'dart:typed_data';
 
 import '../transport/transport.dart';
@@ -373,21 +375,38 @@ class DnssecValidator implements DnssecLookup {
     }
   }
 
+  /// Each message section's records grouped by owner and type, built the
+  /// first time the section is searched. A response can carry thousands of
+  /// records; scanning all of them for every owner would take quadratic
+  /// time, and a hostile resolver could keep a lookup busy with that.
+  static final _sections = Expando<Map<(DnsName, int), List<ResourceRecord>>>();
+
+  static List<ResourceRecord> _recordsAt(List<ResourceRecord> section, DnsName name, int type) {
+    final index = _sections[section] ??= () {
+      final map = <(DnsName, int), List<ResourceRecord>>{};
+      for (final rr in section) {
+        (map[(rr.name, rr.type)] ??= []).add(rr);
+      }
+      return map;
+    }();
+    return index[(name, type)] ?? const [];
+  }
+
+  static Set<Uint8List> _byteSet() =>
+      HashSet<Uint8List>(equals: bytesEqual, hashCode: Object.hashAll);
+
   /// The records of [type] at [name], without duplicates (RFC 2181 §5).
   static List<ResourceRecord> _rrset(List<ResourceRecord> section, DnsName name, int type) {
-    final out = <ResourceRecord>[];
-    for (final rr in section) {
-      if (rr.type != type || rr.cls != DnsClass.internet || rr.name != name) continue;
-      final rdata = rr.canonicalRdata;
-      if (!out.any((r) => bytesEqual(r.canonicalRdata, rdata))) out.add(rr);
-    }
-    return out;
+    final seen = _byteSet();
+    return [
+      for (final rr in _recordsAt(section, name, type))
+        if (rr.cls == DnsClass.internet && seen.add(rr.canonicalRdata)) rr,
+    ];
   }
 
   static List<Rrsig> _sigs(List<ResourceRecord> section, DnsName name, int type) {
     final out = <Rrsig>[];
-    for (final rr in section) {
-      if (rr.type != RRType.rrsig || rr.name != name) continue;
+    for (final rr in _recordsAt(section, name, RRType.rrsig)) {
       try {
         final sig = Rrsig.fromRecord(rr);
         if (sig.typeCovered == type) out.add(sig);
@@ -480,7 +499,7 @@ class DnssecValidator implements DnssecLookup {
       if (sig.labels < owner.rrsigLabelCount) {
         final proof = await _denialProof(msg, signer, keys.keys, (nsecs, prover) {
           return nsecs.isNotEmpty
-              ? nsecProveWildcardExpansion(owner, nsecs)
+              ? nsecProveWildcardExpansion(owner, sig.labels, nsecs, signer)
               : prover.proveWildcardExpansion(owner, sig.labels);
         });
         switch (proof) {
@@ -581,11 +600,8 @@ class DnssecValidator implements DnssecLookup {
   /// is provably unsigned, otherwise bogus.
   Future<(SecurityStatus, _Why?)> _unsignedStatus(DnsName name, int type) async {
     // A DS RRset lives in the parent zone.
-    final zone = await _findZone(type == RRType.ds ? name.parent : name);
-    if (zone == null) {
-      return (SecurityStatus.indeterminate,
-          _why(ValidationError.resolverError, 'Could not find the zone of $name'));
-    }
+    final (zone, error) = await _findZone(type == RRType.ds ? name.parent : name);
+    if (zone == null) return (SecurityStatus.indeterminate, error);
     final keys = await _keysFor(zone);
     return switch (keys.status) {
       SecurityStatus.insecure => (SecurityStatus.insecure, keys.why),
@@ -598,16 +614,24 @@ class DnssecValidator implements DnssecLookup {
   /// Finds the apex of the zone holding [name] from the SOA a resolver
   /// returns. The answer is not trusted as such: [_keysFor] then has to
   /// prove that zone's status from the root down.
-  Future<DnsName?> _findZone(DnsName name) async {
+  ///
+  /// A name whose SOA query gets an error rcode is skipped for its parent,
+  /// as before. A query that got no answer at all (network failure, a
+  /// malformed response, a spent budget) ends the search instead: going on
+  /// up would blame a signed ancestor and call the data bogus when the
+  /// lookup was really indeterminate.
+  Future<(DnsName?, _Why?)> _findZone(DnsName name) async {
     var current = name;
     while (true) {
-      if (current.isRoot) return current;
-      final (msg, _) = await _query(current, RRType.soa);
+      if (current.isRoot) return (current, null);
+      final (msg, error) = await _query(current, RRType.soa);
       if (msg != null) {
-        if (_rrset(msg.answers, current, RRType.soa).isNotEmpty) return current;
+        if (_rrset(msg.answers, current, RRType.soa).isNotEmpty) return (current, null);
         for (final rr in msg.authority) {
-          if (rr.type == RRType.soa && current.isSubdomainOf(rr.name)) return rr.name;
+          if (rr.type == RRType.soa && current.isSubdomainOf(rr.name)) return (rr.name, null);
         }
+      } else if (error?.error != ValidationError.resolverError) {
+        return (null, _why(error?.error, 'Could not find the zone of $current: ${error?.text}'));
       }
       current = current.parent;
     }
@@ -662,6 +686,7 @@ class DnssecValidator implements DnssecLookup {
 
   Future<_ZoneKeys> _fetchKeysUnbounded(DnsName zone) async {
     List<Ds> dsSet;
+    var dsRecords = const <ResourceRecord>[];
     if (zone.isRoot) {
       dsSet = trustAnchors;
     } else {
@@ -681,6 +706,7 @@ class DnssecValidator implements DnssecLookup {
       if (ds.status != SecurityStatus.secure) {
         return _ZoneKeys.fail(ds.status, ds.why);
       }
+      dsRecords = ds.records;
       dsSet = [];
       for (final rr in ds.records) {
         try {
@@ -740,11 +766,22 @@ class DnssecValidator implements DnssecLookup {
           zone.isRoot ? _rootMismatch(keys) : 'No DNSKEY of $zone matches its DS'));
     }
     final sigs = _sigs(msg.answers, zone, RRType.dnskey);
-    if (_verifyRRset(rrset, sigs, zone, anchored) == null) {
+    final sig = _verifyRRset(rrset, sigs, zone, anchored);
+    if (sig == null) {
       return _ZoneKeys.fail(SecurityStatus.bogus, _unverified(sigs, zone, RRType.dnskey,
           'DNSKEY set of $zone is not signed by a key its DS vouches for'));
     }
-    return _ZoneKeys.secure(keys, _ttl(rrset));
+    return _ZoneKeys.secure(keys, _keyLifetime(rrset, dsRecords, sig));
+  }
+
+  /// Seconds the keys may be cached: no longer than the DNSKEY and DS
+  /// records' TTLs, the signature's original TTL (RFC 4035 §5.3.3) or the
+  /// time until the signature expires. Null (not cached) when the
+  /// signature only counted because of [clockSkew].
+  int? _keyLifetime(List<ResourceRecord> dnskeys, List<ResourceRecord> ds, Rrsig sig) {
+    final left = (sig.expiration - _now) & 0xffffffff;
+    if (left == 0 || left >= 0x80000000) return null;
+    return [_ttl(dnskeys), _ttl(ds), sig.originalTtl, left].reduce(min);
   }
 
   /// The active negative trust anchor covering [zone], if any.
@@ -841,12 +878,8 @@ class DnssecValidator implements DnssecLookup {
       owner = owner.suffix(sig.labels).prependString('*');
     }
     final ownerWire = owner.toCanonicalWire();
-    final rdatas = <Uint8List>[];
-    for (final rr in rrset) {
-      final rdata = rr.canonicalRdata;
-      if (!rdatas.any((r) => bytesEqual(r, rdata))) rdatas.add(rdata);
-    }
-    rdatas.sort(compareBytes);
+    final rdatas = (_byteSet()..addAll([for (final rr in rrset) rr.canonicalRdata])).toList()
+      ..sort(compareBytes);
 
     final out = BytesBuilder(copy: false)..add(sig.signedPrefix);
     for (final rdata in rdatas) {

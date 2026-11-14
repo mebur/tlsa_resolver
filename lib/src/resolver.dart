@@ -53,9 +53,20 @@ class TlsaResolver {
   /// A bogus or unanswered address lookup is returned as a failure: the
   /// client cannot know where it would connect, and falling back to [host]
   /// would let an attacker steer around DANE.
+  ///
+  /// [host] must be ASCII: pass an internationalised name in its A-label
+  /// (punycode) form, such as `xn--bcher-kva.example` for `bücher.example`.
+  /// Looked up as raw UTF-8 it would not exist, and DANE would quietly not
+  /// apply, so other text throws an [ArgumentError].
   Future<TlsaResult> lookup(String host,
       {required int port, String protocol = 'tcp', bool followCname = true}) async {
     if (port < 0 || port > 65535) throw ArgumentError.value(port, 'port');
+    if (host.codeUnits.any((c) => c > 0x7f)) {
+      throw ArgumentError.value(host, 'host', 'Not ASCII; pass the A-label (xn--) form');
+    }
+    if (protocol.codeUnits.any((c) => c > 0x7f)) {
+      throw ArgumentError.value(protocol, 'protocol', 'Not ASCII');
+    }
     final hostName = DnsName.parse(host);
     DnsName owner(DnsName base) => base.prependString('_$protocol').prependString('_$port');
     if (!followCname) return lookupName(owner(hostName));

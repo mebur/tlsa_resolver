@@ -1,3 +1,32 @@
+## 0.1.2
+
+Fixes from a security review.
+
+* **Breaking:** a DANE-TA (usage 2) match is now
+  `DaneOutcome.needsChainCheck` instead of `DaneOutcome.verified`, so
+  `isVerified` is false until the caller has checked the chain and the
+  name. Before, a server could send any leaf followed by a copy of the
+  real anchor certificate and get `verified`. A DANE-TA match on the leaf
+  itself is reported the same way, since the name check still applies, and
+  a match that needs no further checks is preferred over a DANE-TA match.
+* An answer expanded from an NSEC-signed wildcard now has to prove that the
+  wildcard's parent is the closest encloser (RFC 4035 §5.3.4). Before, a
+  wildcard answer could be replayed as secure for a name below an existing
+  name, which the wildcard does not cover.
+* Responses are grouped into RRsets in linear time. A 64 KiB response of
+  thousands of records took about 430 ms to process before and about
+  85 ms now, so a hostile resolver can no longer keep a lookup busy for
+  long.
+* Zone keys are cached no longer than the DNSKEY signature's remaining
+  lifetime and original TTL, or the DS TTL, and not at all when the
+  signature only counted because of `clockSkew`.
+* Unsigned data whose zone could not be looked up (no answer, malformed
+  response, or a spent budget) is now indeterminate with that error,
+  instead of bogus with `rrsigsMissing`.
+* `lookup` throws an `ArgumentError` for a non-ASCII host or protocol
+  instead of looking up raw UTF-8, which never exists and made DANE quietly
+  not apply. Pass internationalised names in A-label (`xn--`) form.
+
 ## 0.1.1
 
 * Allows code_assets 2.x (now `^2.2.0`) and requires native_toolchain_c

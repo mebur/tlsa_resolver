@@ -32,9 +32,17 @@ switch (result.status) {
 
 // After the TLS handshake, check the server's chain (DER, leaf first):
 final verdict = DaneVerifier.verify(result, chain, pkixValidated: platformSaidOk);
-if (verdict.outcome == DaneOutcome.mismatch ||
-    verdict.outcome == DaneOutcome.lookupFailed) {
-  // reject
+switch (verdict.outcome) {
+  case DaneOutcome.verified:
+    // accept
+  case DaneOutcome.needsChainCheck:
+    // DANE-TA matched: accept only after checking that the leaf chains to
+    // chain[verdict.match!.certificateIndex] and its name matches.
+  case DaneOutcome.notApplicable:
+    // no DANE: ordinary certificate validation decides
+  case DaneOutcome.mismatch:
+  case DaneOutcome.lookupFailed:
+    // reject
 }
 ```
 
@@ -70,9 +78,11 @@ Known limits:
 * The root trust anchors are built in and do not update themselves
   (RFC 5011): a future root key rollover needs a package update, or pass
   `trustAnchors`.
-* DANE-TA (usage 2) matches are reported with `requiresChainCheck`; building
-  and checking the certificate path to the matched anchor is up to the
-  caller.
+* DANE-TA (usage 2) matches come back as `DaneOutcome.needsChainCheck`, not
+  `verified`: building and checking the certificate path to the matched
+  anchor, and the name check, are up to the caller.
+* `lookup` takes ASCII host names only; pass internationalised names in
+  their A-label (`xn--`) form.
 
 Please report security problems privately through GitHub's security
 advisories for [mebur/tlsa_resolver](https://github.com/mebur/tlsa_resolver/security/advisories/new),
@@ -194,10 +204,14 @@ takes an explicit owner name such as `_25._tcp.mail.example.com`.
 `DaneVerifier.verify` follows RFC 7671:
 
 * **DANE-EE (3)** matches the leaf certificate only; no PKIX or name checks.
-* **DANE-TA (2)** matches any certificate in the presented chain. When it
-  matches one other than the leaf, `verdict.requiresChainCheck` is true: you
-  still need to check that the leaf chains to it and the name matches. This
-  library does not build X.509 paths.
+* **DANE-TA (2)** matches any certificate in the presented chain, and the
+  outcome is `needsChainCheck` rather than `verified`: anchor certificates
+  are public, so anyone can send one after a leaf of their own. Accept only
+  after checking that the leaf chains to the matched certificate
+  (`verdict.match!.certificateIndex`) and that its name matches the
+  service. This library does not build X.509 paths. A match that needs no
+  further checks (DANE-EE, or a PKIX usage with `pkixValidated`) is
+  preferred when there is one.
 * **PKIX-TA (0) / PKIX-EE (1)** only count when `pkixValidated` is true.
 * Records with unknown parameters or wrong digest lengths are ignored.
 
@@ -235,7 +249,10 @@ which this package does not support. CI runs it on every push and weekly.
 
 * Signatures count up to `clockSkew` (default one hour) outside their
   validity period, since phone clocks are often a few minutes off;
-  `Duration.zero` is strict. A signature that is still outside reports
+  `Duration.zero` is strict. The flip side is that an expired signature
+  can be replayed for that long. Zone keys are cached no longer than their
+  TTLs or their signature's lifetime, and not at all when only the
+  tolerance let the signature count. A signature that is still outside reports
   `signatureExpired` or `signatureNotYetValid`.
 * `negativeTrustAnchors` (RFC 7646) maps domains whose DNSSEC is known to be
   broken to the time the exception ends; until then, answers at or below

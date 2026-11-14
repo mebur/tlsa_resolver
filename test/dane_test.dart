@@ -67,12 +67,32 @@ void main() {
     expect(DaneVerifier.verify(result, [other, cert]).outcome, DaneOutcome.mismatch);
   });
 
-  test('DANE-TA matches an issuer and asks for a chain check', () {
+  test('DANE-TA matches an issuer but is not verified until the chain is checked', () {
+    // Anyone can append the real anchor certificate after their own leaf.
     final result = _secureResult([TlsaRecord(2, 0, 1, Uint8List.fromList(_hex(_certSha256)))]);
     final verdict = DaneVerifier.verify(result, [other, cert]);
-    expect(verdict.outcome, DaneOutcome.verified);
+    expect(verdict.outcome, DaneOutcome.needsChainCheck);
+    expect(verdict.isVerified, isFalse);
     expect(verdict.match!.certificateIndex, 1);
     expect(verdict.requiresChainCheck, isTrue);
+  });
+
+  test('DANE-TA matching the leaf still needs the name check', () {
+    final result = _secureResult([TlsaRecord(2, 0, 1, Uint8List.fromList(_hex(_certSha256)))]);
+    final verdict = DaneVerifier.verify(result, [cert]);
+    expect(verdict.outcome, DaneOutcome.needsChainCheck);
+    expect(verdict.match!.certificateIndex, 0);
+  });
+
+  test('a match that needs no further checks wins over DANE-TA', () {
+    final result = _secureResult([
+      TlsaRecord(2, 0, 1, Uint8List.fromList(_hex(_certSha256))),
+      TlsaRecord(1, 1, 2, Uint8List.fromList(_hex(_spkiSha512))),
+    ]);
+    expect(DaneVerifier.verify(result, [cert]).outcome, DaneOutcome.needsChainCheck);
+    final verdict = DaneVerifier.verify(result, [cert], pkixValidated: true);
+    expect(verdict.outcome, DaneOutcome.verified);
+    expect(verdict.match!.record.usage, TlsaUsage.pkixEe);
   });
 
   test('PKIX usages need PKIX validation', () {

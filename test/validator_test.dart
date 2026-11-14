@@ -28,6 +28,13 @@ void main() {
       expect(result.records.single.toString(), startsWith('3 1 1 000102'));
     });
 
+    test('non-ASCII host names are refused instead of quietly finding nothing', () async {
+      expect(() => h.resolver().lookup('bücher.example.test', port: 443), throwsArgumentError);
+      expect(() => h.resolver().lookup('www.example.test', port: 443, protocol: 'tçp'),
+          throwsArgumentError);
+      expect(h.dns.queries, isEmpty);
+    });
+
     test('tampered data is bogus', () async {
       const name = '_443._tcp.www.example.test.';
       final sig = h.example.sign([tlsa(name)]);
@@ -188,6 +195,19 @@ void main() {
       ]));
       final result = await h.resolver().lookupName(n(name));
       expect(result.status, SecurityStatus.secure, reason: result.reason);
+    });
+
+    test('a wildcard answer cannot be replayed below an existing name', () async {
+      // www.example.test exists, so *.example.test does not reach names
+      // below it, although the NSEC from www covers the queried name.
+      final expanded = tlsa(name);
+      final sig = h.example.sign([expanded], labels: 2);
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [expanded, sig], authority: [
+        ...h.example.signed_([h.example.nsec('www.example.test.', 'zzz.example.test.', {RRType.a})]),
+      ]));
+      final result = await h.resolver().lookupName(n(name));
+      expect(result.status, SecurityStatus.bogus);
+      expect(result.reason, contains('Wildcard answer'));
     });
   });
 
@@ -396,6 +416,26 @@ void main() {
       expect((await lookup()).error, ValidationError.rrsigsMissing);
     });
 
+    test('unsigned data whose zone cannot be looked up is indeterminate, not bogus', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [tlsa(name)]));
+      // The SOA query for the name gets no answer; its signed parent would.
+      final transport = _FailingFor(h.dns, (n(name), RRType.soa));
+      final result = await TlsaResolver(validator: DnssecValidator(transport,
+          trustAnchors: [h.root.dsValue], clock: () => testNow)).lookupName(n(name));
+      expect(result.status, SecurityStatus.indeterminate, reason: result.reason);
+      expect(result.error, ValidationError.networkError);
+      expect(result.reason, contains('Could not find the zone'));
+    });
+
+    test('running out of queries while finding the zone is limitExceeded', () async {
+      h.dns.on(name, RRType.tlsa, FakeResponse(answers: [tlsa(name)]));
+      // One query for the TLSA, none left for the SOA.
+      final result = await TlsaResolver(validator: DnssecValidator(h.dns,
+          trustAnchors: [h.root.dsValue], clock: () => testNow, maxQueries: 1)).lookupName(n(name));
+      expect(result.status, SecurityStatus.indeterminate, reason: result.reason);
+      expect(result.error, ValidationError.limitExceeded);
+    });
+
     test('a denial without a valid proof is nsecMissing (12)', () async {
       h.dns.on(name, RRType.tlsa, FakeResponse(authority: [
         ...h.example.signed_([h.example.soa]),
@@ -494,6 +534,41 @@ void main() {
       final result = await TlsaResolver(validator: strict).lookupName(n(name));
       expect(result.status, SecurityStatus.bogus);
       expect(result.error, ValidationError.signatureExpired);
+    });
+
+    group('cached zone keys', () {
+      var now = testNow;
+      late DnssecValidator validator;
+      int dnskeyQueries() =>
+          h.dns.queries.where((q) => q == (n('example.test.'), RRType.dnskey)).length;
+
+      setUp(() {
+        now = testNow;
+        h.dns.on(name, RRType.tlsa, FakeResponse(answers: h.example.signed_([tlsa(name)])));
+        validator = DnssecValidator(h.dns, trustAnchors: [h.root.dsValue], clock: () => now);
+      });
+
+      test('are not kept past their signature (TTL 3600, signature ends in 60 s)', () async {
+        final keys = h.example.dnskey;
+        h.dns.on('example.test.', RRType.dnskey,
+            FakeResponse(answers: [keys, h.example.sign([keys], expirationOffset: 60)]));
+        expect((await validator.resolve(n(name), RRType.tlsa)).status, SecurityStatus.secure);
+        now = testNow.add(const Duration(seconds: 30));
+        await validator.resolve(n(name), RRType.tlsa);
+        expect(dnskeyQueries(), 1);
+        now = testNow.add(const Duration(seconds: 90));
+        await validator.resolve(n(name), RRType.tlsa);
+        expect(dnskeyQueries(), 2);
+      });
+
+      test('are not cached when only the clock tolerance let the signature count', () async {
+        final keys = h.example.dnskey;
+        h.dns.on('example.test.', RRType.dnskey,
+            FakeResponse(answers: [keys, h.example.sign([keys], expirationOffset: -60)]));
+        expect((await validator.resolve(n(name), RRType.tlsa)).status, SecurityStatus.secure);
+        await validator.resolve(n(name), RRType.tlsa);
+        expect(dnskeyQueries(), 2);
+      });
     });
   });
 
@@ -758,4 +833,18 @@ class _SlowTransport implements DnsTransport {
 class _HangingTransport implements DnsTransport {
   @override
   Future<Uint8List> send(Uint8List query) => Completer<Uint8List>().future;
+}
+
+/// Fails one question with a network error and passes the rest through.
+class _FailingFor implements DnsTransport {
+  _FailingFor(this.inner, this.question);
+  final DnsTransport inner;
+  final (DnsName, int) question;
+
+  @override
+  Future<Uint8List> send(Uint8List query) {
+    final q = DnsMessage.parse(query).questions.single;
+    if ((q.name, q.type) == question) throw DnsTransportException('unreachable');
+    return inner.send(query);
+  }
 }
