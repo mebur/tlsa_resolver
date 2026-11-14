@@ -43,3 +43,4 @@ local.properties
 device_test/
 test/wycheproof/
 .github/
+test/ed25519_speccheck/

@@ -63,8 +63,10 @@ has **not been independently audited**. In its place:
 * Project Wycheproof's test vectors check the Ed25519, ECDSA and RSA
   signature verification. All 210 Ed25519 vectors also pin the behaviour
   of the `ed25519_edwards` package itself, so an update that changes it
-  fails CI. Small-order Ed25519 keys, which that package accepts and which
-  verify any signature, are refused.
+  fails CI, and so do the 12 edge cases of ed25519-speccheck, on which
+  Ed25519 libraries disagree. Ed25519 keys and signatures built on
+  small-order points, which that package accepts (with the identity key
+  any signature verifies), are refused, as libsodium does.
 * A differential test compares every answer with Unbound on about 750 live
   lookups across many TLDs, algorithms and denial types, in CI on every push
   and weekly. The only difference is Ed448 (see below).
@@ -301,8 +303,12 @@ RSA PKCS#1 signature vectors (vendored in `test/wycheproof/`) through the
 signature checks. `test/ed25519_test.dart` runs every Ed25519 vector,
 including the ones Wycheproof marks "acceptable", against the
 `ed25519_edwards` package directly and pins its outcomes, so a dependency
-update that changes any of them fails; it also checks that small-order keys
-are refused. `test/fuzz_test.dart` corrupts responses on the way to
+update that changes any of them fails. It does the same with the 12
+[ed25519-speccheck](https://github.com/novifinancial/ed25519-speccheck)
+cases (vendored in `test/ed25519_speccheck/`) from "Taming the many
+EdDSAs": the package matches Go, BoringSSL and OpenSSL 3 on them, and
+`verifySignature`, which also refuses small-order points, matches
+libsodium. `test/fuzz_test.dart` corrupts responses on the way to
 the validator (bit flips, truncation, dropped, duplicated and moved records,
 replayed signed records, forged denials) and checks that a lookup never
 throws and never comes out secure with anything but the untampered answer.

@@ -10,8 +10,11 @@ import 'package:tlsa_resolver/src/dnssec/crypto.dart';
 /// crypto dependencies, so its behaviour is pinned here against Project
 /// Wycheproof's Ed25519 vectors (test/wycheproof/ed25519_test.json), all
 /// of them, including the "acceptable" ones whose outcome RFC 8032 leaves
-/// open. A dependency update that changes any outcome fails these tests,
-/// so it can be looked at before it ships.
+/// open, and against the 12 edge cases of ed25519-speccheck
+/// (test/ed25519_speccheck/cases.json, from "Taming the many EdDSAs",
+/// Chalkias, Garillot and Nikolaenko, SSR 2020), on which implementations
+/// disagree. A dependency update that changes any outcome fails these
+/// tests, so it can be looked at before it ships.
 void main() {
   final vectors = [
     for (final group in _groups())
@@ -87,6 +90,71 @@ void main() {
           if (!v.flags.contains('SmallOrderPublicKey') && v.weVerify != v.libraryVerifies) v,
       ];
       expect(other, isEmpty, reason: other.join('\n'));
+    });
+  });
+
+  group('ed25519-speccheck', () {
+    // What each case tests, from the speccheck README (A is the public key,
+    // R and S the halves of the signature).
+    const what = [
+      'small A and R, S = 0',
+      'small A',
+      'small R',
+      'mixed-order A and R; passes either equation',
+      'mixed-order A and R; passes only the cofactored equation',
+      'passes the cofactored equation only if 8h is pre-reduced',
+      'S > L',
+      'S >> L, beyond a canonical encoding',
+      'non-canonical R, reduced for the hash',
+      'non-canonical R, not reduced for the hash',
+      'non-canonical small A, reduced for the hash',
+      'non-canonical small A, not reduced for the hash',
+    ];
+    final cases = [
+      for (final c in (jsonDecode(File('test/ed25519_speccheck/cases.json').readAsStringSync())
+              as List)
+          .cast<Map<String, dynamic>>())
+        (
+          key: _hex(c['pub_key'] as String),
+          message: _hex(c['message'] as String),
+          signature: _hex(c['signature'] as String),
+        ),
+    ];
+
+    String outcomes(bool Function(Uint8List key, Uint8List message, Uint8List signature) verify) =>
+        [
+          for (final c in cases)
+            () {
+              try {
+                return verify(c.key, c.message, c.signature) ? 'V' : 'X';
+              } catch (_) {
+                return 'X';
+              }
+            }(),
+        ].join();
+
+    String explain(String got, String want) => [
+          for (var i = 0; i < cases.length; i++)
+            if (got[i] != want[i]) 'case $i (${what[i]}): got ${got[i]}, expected ${want[i]}',
+        ].join('\n');
+
+    test('the cases are all there', () => expect(cases, hasLength(what.length)));
+
+    test('ed25519_edwards behaves like Go, BoringSSL and OpenSSL 3', () {
+      // Cofactorless, refuses S >= L and non-canonical R, accepts small
+      // and mixed-order points. The row those libraries share in the
+      // speccheck results table.
+      const want = 'VVVVXXXXXXXV';
+      final got = outcomes((k, m, s) => ed25519.verify(ed25519.PublicKey(k), m, s));
+      expect(got, want, reason: explain(got, want));
+    });
+
+    test('verifySignature behaves like libsodium', () {
+      // The same, but small-order A or R is refused too, which also covers
+      // case 11's non-canonical encoding of a small A.
+      const want = 'XXXVXXXXXXXX';
+      final got = outcomes((k, m, s) => verifySignature(DnssecAlgorithm.ed25519, k, m, s));
+      expect(got, want, reason: explain(got, want));
     });
   });
 }

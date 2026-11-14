@@ -84,6 +84,7 @@ bool verifySignature(int algorithm, Uint8List publicKey, Uint8List data,
       DnssecAlgorithm.ed25519 => publicKey.length == 32 &&
           signature.length == 64 &&
           !_ed25519SmallOrder(publicKey) &&
+          !_ed25519SmallOrder(signature) &&
           ed25519.verify(ed25519.PublicKey(publicKey), data, signature),
       _ => false,
     };
@@ -94,11 +95,12 @@ bool verifySignature(int algorithm, Uint8List publicKey, Uint8List data,
 
 /// Encodings of the eight Ed25519 points of small order (the y coordinate,
 /// sign bit cleared), including y = p and y = p + 1, which decode to 0 and
-/// 1. The same list as libsodium's. With such a key, signatures verify for
-/// any message (the identity key accepts R = identity, S = 0 for all), and
-/// ed25519_edwards does not refuse them, so they are refused here. No
-/// honestly made key has small order.
-final _ed25519SmallOrderKeys = [
+/// 1. The same list as libsodium's, which refuses such points both as the
+/// public key A and as a signature's R. With such a key, signatures verify
+/// for any message (the identity key accepts R = identity, S = 0 for all),
+/// and ed25519_edwards does not refuse them, so they are refused here. No
+/// honestly made key or signature has a small-order point.
+final _ed25519SmallOrderPoints = [
   for (final hex in const [
     '0000000000000000000000000000000000000000000000000000000000000000', // 0, order 4
     '0100000000000000000000000000000000000000000000000000000000000000', // 1, identity
@@ -111,9 +113,11 @@ final _ed25519SmallOrderKeys = [
     [for (var i = 0; i < 64; i += 2) int.parse(hex.substring(i, i + 2), radix: 16)],
 ];
 
-bool _ed25519SmallOrder(Uint8List key) {
-  final y = [...key.sublist(0, 31), key[31] & 0x7f];
-  return _ed25519SmallOrderKeys.any((k) => bytesEqual(k, y));
+/// Whether the point encoded in the first 32 bytes of [bytes] (a public key,
+/// or the R half of a signature) has small order.
+bool _ed25519SmallOrder(Uint8List bytes) {
+  final y = [...bytes.sublist(0, 31), bytes[31] & 0x7f];
+  return _ed25519SmallOrderPoints.any((p) => bytesEqual(p, y));
 }
 
 BigInt _unsigned(List<int> bytes) {
