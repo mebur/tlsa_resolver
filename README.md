@@ -80,7 +80,15 @@ Known limits:
   are treated as unsigned.
 * The root trust anchors are built in and do not update themselves
   (RFC 5011): a future root key rollover needs a package update, or pass
-  `trustAnchors`.
+  `trustAnchors`. Both KSK-2017 (key tag 20326) and KSK-2024 (38696) are
+  trusted across the current rollover; KSK-2017 will be removed in a
+  release after IANA revokes it.
+* NSEC3 opt-out (RFC 5155 §6) lets a zone leave unsigned delegations out
+  of its NSEC3 chain, so where a zone uses it, an attacker can claim that a
+  name which does not exist lies below an unsigned delegation and get an
+  insecure answer for it. RFC 5155 accepts this risk. It cannot reach
+  names that exist, since every ancestor of a real record does too, so it
+  only matters for names answered from a wildcard.
 * DANE-TA (usage 2) matches come back as `DaneOutcome.needsChainCheck`, not
   `verified`: building and checking the certificate path to the matched
   anchor, and the name check, are up to the caller.
