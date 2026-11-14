@@ -5,7 +5,6 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
-import 'package:tlsa_resolver/src/wire/message.dart';
 import 'package:tlsa_resolver/tlsa_resolver.dart';
 
 import '../tool/dane_connect.dart';
