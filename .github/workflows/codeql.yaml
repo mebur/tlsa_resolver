@@ -1,0 +1,57 @@
+name: CodeQL
+
+# CodeQL does not analyse Dart, so this covers the two other parts that run
+# with privileges: the C shim (src/), which the package compiles into apps,
+# and the GitHub Actions workflows, which hold the pub.dev publishing token.
+# The validator itself is covered by the tests, the fuzzer and the planted
+# bugs in ci.yaml. The Swift and Kotlin in example/ and device_test/ is
+# Flutter's generated app scaffolding and is not scanned.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '41 4 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write # upload the results to code scanning
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: c-cpp
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+      - name: Build the C shim
+        if: matrix.language == 'c-cpp'
+        run: |
+          mkdir -p build
+          cc -std=gnu11 -Wall -Wextra -O2 -Isrc \
+            src/tlsa_resolver.c test/native/shim_test.c -lresolv -o build/shim_test
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:${{ matrix.language }}
