@@ -1,3 +1,10 @@
+## Unreleased
+
+* README: how to pin your own backend's certificate with a TLSA record,
+  including an `HttpClient` that checks the certificate before sending
+  anything, and how to change keys without locking clients out.
+  `tool/dane_connect.dart` gains `pinned` and `pinnedHttpClient`.
+
 ## 0.2.0
 
 Fixes from a security review. The minor version is raised because the

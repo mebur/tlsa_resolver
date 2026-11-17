@@ -4,6 +4,9 @@
 //   dart run tool/dane_connect.dart www.google.com           # no TLSA: PKIX decides
 //   dart run tool/dane_connect.dart www.freebsd.org --connect www.debian.org
 //                                                            # wrong server: refused
+//   dart run tool/dane_connect.dart www.google.com --pinned  # no TLSA: refused
+//   dart run tool/dane_connect.dart https://www.freebsd.org/ --pinned
+//                                                            # GET through pinnedHttpClient
 //
 // What dart:io allows: SecureSocket gives the server's leaf certificate and
 // nothing else of the chain. That is all DANE-EE (usage 3, by far the most
@@ -37,15 +40,24 @@ class DaneException implements IOException {
 ///   enough even if the certificate is self-signed, expired or for another
 ///   name (RFC 7671 §5.1); PKIX-EE also needs ordinary validation to pass.
 ///
+/// With [pinned], used for your own backend, the host must publish secure
+/// TLSA records: without them the connection is refused instead of left
+/// to ordinary validation, so the records act as a certificate pin that is
+/// changed in DNS rather than in an app release.
+///
 /// [connectTo] connects to another host while checking [host]'s records,
 /// to try a server that should not match.
 Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int port,
-    {String? connectTo}) async {
+    {bool pinned = false, String? connectTo}) async {
   final tlsa = await resolver.lookup(host, port: port);
   if (tlsa.isFailure) {
     throw DaneException('TLSA lookup for $host failed (${tlsa.status.name}): ${tlsa.reason}');
   }
   final daneApplies = tlsa.daneApplies;
+  if (pinned && !daneApplies) {
+    throw DaneException('$host publishes no secure, usable TLSA records for port $port '
+        '(${tlsa.status.name}${tlsa.reason == null ? '' : ': ${tlsa.reason}'})');
+  }
 
   var pkixValidated = true;
   final socket = await SecureSocket.connect(connectTo ?? host, port,
@@ -73,12 +85,42 @@ Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int por
   });
 }
 
+/// An [HttpClient] for your own backend that only talks HTTPS to servers
+/// whose certificate matches their TLSA records ([connectWithDane] with
+/// `pinned: true`). The check happens on connecting, before any request,
+/// headers or body, is sent. Plain http:// and proxies are refused: through
+/// a proxy, the client would not see the backend's certificate.
+HttpClient pinnedHttpClient(TlsaResolver resolver, {String? connectTo}) => HttpClient()
+  ..findProxy = ((_) => 'DIRECT')
+  ..connectionFactory = (uri, proxyHost, proxyPort) async {
+    if (uri.scheme != 'https') throw DaneException('Refusing ${uri.scheme}://${uri.host}: not HTTPS');
+    // HttpClient uses the SecureSocket as it is, without securing it again.
+    return ConnectionTask.fromSocket(
+        connectWithDane(resolver, uri.host, uri.port, pinned: true, connectTo: connectTo), () {});
+  };
+
 Future<void> main(List<String> args) async {
   if (args.isEmpty) {
-    print('Usage: dart run tool/dane_connect.dart <host> [port] [--connect <other host>]');
+    print('Usage: dart run tool/dane_connect.dart <host> [port] [--connect <other host>] [--pinned]\n'
+        '       dart run tool/dane_connect.dart <https URL> --pinned');
     exit(64);
   }
   final rest = [...args];
+  final pinned = rest.remove('--pinned');
+  if (pinned && rest.first.startsWith('https://')) {
+    final client = pinnedHttpClient(TlsaResolver());
+    try {
+      final response = await (await client.getUrl(Uri.parse(rest.first))).close();
+      await response.drain<void>();
+      print('HTTP ${response.statusCode}: the certificate matches a TLSA record.');
+    } on DaneException catch (e) {
+      print('Refused: ${e.message}');
+      exitCode = 1;
+    } finally {
+      client.close(force: true);
+    }
+    return;
+  }
   String? connectTo;
   final connect = rest.indexOf('--connect');
   if (connect >= 0) {
@@ -93,7 +135,7 @@ Future<void> main(List<String> args) async {
   print('TLSA _$port._tcp.$host: ${tlsa.status.name}, '
       '${tlsa.usableRecords.length} usable record(s)${tlsa.reason == null ? '' : ' (${tlsa.reason})'}');
   try {
-    final socket = await connectWithDane(resolver, host, port, connectTo: connectTo);
+    final socket = await connectWithDane(resolver, host, port, pinned: pinned, connectTo: connectTo);
     print(tlsa.daneApplies
         ? 'Connected: the certificate matches a TLSA record.'
         : 'Connected: no DANE for this host, so ordinary certificate validation decided.');

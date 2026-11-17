@@ -257,10 +257,13 @@ servers that publish only those cannot be verified, and the connection
 should be refused rather than let through on ordinary validation alone.
 
 ```dart
-Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int port) async {
+Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int port,
+    {bool pinned = false}) async {
   final tlsa = await resolver.lookup(host, port: port);
   // Bogus or failed: do not fall back to ordinary validation (RFC 7672 §2.2).
   if (tlsa.isFailure) throw DaneException('TLSA lookup failed: ${tlsa.reason}');
+  // Your own backend (see below): no records means no connection.
+  if (pinned && !tlsa.daneApplies) throw DaneException('$host has no TLSA records');
 
   var pkixValidated = true;
   final socket = await SecureSocket.connect(host, port, onBadCertificate: (_) {
@@ -284,8 +287,9 @@ Future<SecureSocket> connectWithDane(TlsaResolver resolver, String host, int por
 
 (`DaneException` is an exception class of your own.) A DANE-EE match is
 accepted even when the certificate is self-signed, expired or for another
-name, which is what DANE-EE means (RFC 7671 §5.1). For STARTTLS (SMTP on port 25), do the same with `SecureSocket.secure` on
-the plain socket after the `STARTTLS` exchange.
+name, which is what DANE-EE means (RFC 7671 §5.1). For STARTTLS (SMTP on
+port 25), do the same with `SecureSocket.secure` on the plain socket after
+the `STARTTLS` exchange.
 
 `tool/dane_connect.dart` is this function as a command-line tool, and
 `test/dane_connect_test.dart` checks it against a local server with a
@@ -295,6 +299,81 @@ self-signed certificate:
 dart run tool/dane_connect.dart www.freebsd.org        # matches its 3 1 1 record
 dart run tool/dane_connect.dart www.google.com         # no DANE: ordinary validation
 dart run tool/dane_connect.dart www.freebsd.org --connect www.debian.org   # refused
+```
+
+## Pinning your own backend's certificate
+
+For a backend you run, DANE works as a certificate pin that lives in DNS
+instead of in the app: publish the hash of the server's public key in a
+TLSA record, and have the app refuse any server that does not match it,
+and any answer without the record. Changing the key then means changing a
+DNS record, not shipping an app update.
+
+**1. Publish the record.** The zone must be signed with DNSSEC. A `3 1 1`
+record (DANE-EE, public key, SHA-256) pins the key, so renewing the
+certificate with the same key needs no DNS change:
+
+```sh
+openssl x509 -in cert.pem -noout -pubkey | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 | sed 's/^.* //'
+```
+
+```text
+_443._tcp.api.example.com. 3600 IN TLSA 3 1 1 <that hash>
+```
+
+`DaneVerifier.recordFor(certDer)` computes the same record in Dart. Check
+that it validates with `dart run tool/probe.dart _443._tcp.api.example.com`
+(it must say secure).
+
+**2. Connect only through it.** `connectWithDane` from above with
+`pinned: true` refuses a host without secure TLSA records. For HTTP, hand
+it to `HttpClient` as its connection factory, so the certificate is checked
+before anything, auth headers included, is sent:
+
+```dart
+HttpClient pinnedHttpClient(TlsaResolver resolver) => HttpClient()
+  // Through a proxy the client would not see the backend's certificate.
+  ..findProxy = ((_) => 'DIRECT')
+  ..connectionFactory = (uri, proxyHost, proxyPort) async {
+    if (uri.scheme != 'https') throw DaneException('not HTTPS: $uri');
+    // HttpClient uses the SecureSocket as it is, without securing it again.
+    return ConnectionTask.fromSocket(
+        connectWithDane(resolver, uri.host, uri.port, pinned: true), () {});
+  };
+```
+
+```dart
+final resolver = TlsaResolver.inBackground();
+final client = pinnedHttpClient(resolver);
+final response = await (await client.getUrl(Uri.parse('https://api.example.com/v1/me'))).close();
+```
+
+The certificate does not need to come from a public CA: a DANE-EE match is
+enough, so a self-signed certificate works too. Using one from a public CA
+anyway keeps the backend usable by browsers and other clients.
+
+**3. Changing the key.** Publish a second `3 1 1` record for the new key
+next to the old one, wait at least the record's TTL so resolvers have
+dropped the old answer, switch the server to the new key, then remove the
+old record. Both records match during the switch, so no client is locked
+out.
+
+**What you trust instead.** Not the hundred-odd public CAs, but the DNSSEC
+chain to your zone: the root, your TLD, your registrar and whoever hosts
+your DNS. Anyone who can change your zone can change the pin, so protect
+that account like the server's key. And if the zone's signatures break or
+expire, the app cannot connect at all, as with any pin: monitor the
+record, for example with the `probe` tool.
+
+`tool/dane_connect.dart` contains both functions, and
+`test/dane_connect_test.dart` checks against a local HTTPS server that a
+matching backend is reached and that nothing is sent to one that does not
+match:
+
+```sh
+dart run tool/dane_connect.dart https://www.freebsd.org/ --pinned   # HTTP 200
+dart run tool/dane_connect.dart https://www.google.com/ --pinned    # refused: no TLSA
 ```
 
 ## Development

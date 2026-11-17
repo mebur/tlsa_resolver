@@ -10,12 +10,14 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 import '../tool/dane_connect.dart';
 import 'support/fake_dns.dart';
 
-/// tool/dane_connect.dart against a local TLS server with a self-signed
-/// certificate for another name, so ordinary validation always fails and
-/// only DANE can let the connection through.
+/// tool/dane_connect.dart against local TLS and HTTPS servers with a
+/// self-signed certificate for another name, so ordinary validation always
+/// fails and only DANE can let the connection through.
 void main() {
   late Directory dir;
   late SecureServerSocket server;
+  late HttpServer web;
+  var requests = 0;
   late Uint8List certDer;
   late TestHierarchy h;
   const host = 'www.example.test';
@@ -32,14 +34,22 @@ void main() {
       if (r.exitCode != 0) throw StateError('openssl ${args.first}: ${r.stderr}');
     }
     certDer = await File(der).readAsBytes();
-    server = await SecureServerSocket.bind('localhost', 0,
-        SecurityContext()..useCertificateChain(cert)..usePrivateKey(key));
+    final context = SecurityContext()..useCertificateChain(cert)..usePrivateKey(key);
+    server = await SecureServerSocket.bind('localhost', 0, context);
     server.listen((socket) => socket.listen((_) {}, onError: (_) {}, cancelOnError: true),
         onError: (_) {});
+    web = await HttpServer.bindSecure('localhost', 0, context);
+    web.listen((request) {
+      requests++;
+      request.response
+        ..write('hello from the backend')
+        ..close();
+    }, onError: (_) {});
   });
 
   tearDownAll(() async {
     await server.close();
+    await web.close(force: true);
     await dir.delete(recursive: true);
   });
 
@@ -85,5 +95,56 @@ void main() {
     h.dns.on(owner(), RRType.tlsa, FakeResponse(answers: [tlsaRecord(owner(), 3, 1, 1, List.filled(32, 7))]));
     await expectLater(connect(), throwsA(isA<DaneException>()
         .having((e) => e.message, 'message', contains('bogus'))));
+  });
+
+  group('pinning a backend', () {
+    void publish(int port, List<int> data) {
+      final name = '_$port._tcp.$host.';
+      h.dns.on(name, RRType.tlsa,
+          FakeResponse(answers: h.example.signed_([tlsaRecord(name, 3, 1, 1, data)])));
+    }
+
+    test('without TLSA records the connection is refused, not left to PKIX', () async {
+      h.dns.on(owner(), RRType.tlsa, FakeResponse(authority: [
+        ...h.example.signed_([h.example.soa]),
+        ...h.example.signed_([h.example.nsec(owner(), 'zzz.example.test.', {RRType.txt})]),
+      ]));
+      await expectLater(
+          connectWithDane(h.resolver(), host, server.port, pinned: true, connectTo: 'localhost'),
+          throwsA(isA<DaneException>()
+              .having((e) => e.message, 'message', contains('publishes no secure'))));
+    });
+
+    group('pinnedHttpClient', () {
+      late HttpClient client;
+      setUp(() => client = pinnedHttpClient(h.resolver(), connectTo: 'localhost'));
+      tearDown(() => client.close(force: true));
+
+      Future<String> get() async {
+        final request = await client.getUrl(Uri.https('$host:${web.port}', '/'));
+        request.headers.set('authorization', 'Bearer secret');
+        final response = await request.close();
+        return response.transform(const SystemEncoding().decoder).join();
+      }
+
+      test('talks to the backend whose key the TLSA record pins', () async {
+        publish(web.port, DaneVerifier.recordFor(certDer).data);
+        final before = requests;
+        expect(await get(), 'hello from the backend');
+        expect(requests, before + 1);
+      });
+
+      test('sends nothing to a server whose key does not match', () async {
+        publish(web.port, List.filled(32, 7));
+        final before = requests;
+        await expectLater(get(), throwsA(isA<DaneException>()));
+        expect(requests, before, reason: 'the request, with its token, must not reach the server');
+      });
+
+      test('refuses plain http', () async {
+        await expectLater(client.getUrl(Uri.http('$host:${web.port}', '/')),
+            throwsA(isA<DaneException>()));
+      });
+    });
   });
 }
