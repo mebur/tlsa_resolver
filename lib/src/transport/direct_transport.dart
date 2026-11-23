@@ -69,8 +69,15 @@ class DirectDnsTransport implements DnsTransport {
 
   Future<Uint8List> _tcp(Uint8List query) async {
     Socket? socket;
+    var finished = false;
     Future<Uint8List> exchange() async {
       final s = socket = await Socket.connect(server, port, timeout: timeout);
+      // Connected only after the deadline: nobody is waiting any more, and
+      // the finally below has already run without a socket to close.
+      if (finished) {
+        s.destroy();
+        throw DnsTransportException('Connected after the deadline');
+      }
       // A write that fails (the server resets the connection) reports its
       // error on done; unheard, it would be an uncaught error. The read
       // below sees the failure too.
@@ -100,6 +107,7 @@ class DirectDnsTransport implements DnsTransport {
     } on SocketException catch (e) {
       throw DnsTransportException(e.message);
     } finally {
+      finished = true;
       socket?.destroy();
     }
   }

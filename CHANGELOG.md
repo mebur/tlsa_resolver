@@ -8,7 +8,8 @@
   `timeout`, for the whole exchange. Before, the timeout restarted with
   each chunk, so a resolver sending a byte at a time could hold a query
   open far longer (the validator's own lookup timeout still ended the
-  lookup, but the connection stayed open).
+  lookup, but the connection stayed open). A connection that opens only
+  after the deadline is closed at once.
 * `DirectDnsTransport`: a resolver that resets the TCP connection while
   the query is written no longer causes an uncaught `SocketException`,
   which could end a Dart program; UDP socket errors and failures to bind

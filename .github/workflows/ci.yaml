@@ -78,7 +78,7 @@ jobs:
             code=0
             dart run tool/differential.dart --server 9.9.9.9 || code=$?
             if [ "$code" -ne 2 ]; then exit "$code"; fi
-            echo "::warning::Differential run $attempt was unreliable (network); retrying"
+            echo "::warning::Differential run $attempt was unreliable (network, or it stalled); retrying"
             sleep 60
           done
           exit 2

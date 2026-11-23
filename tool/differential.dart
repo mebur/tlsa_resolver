@@ -16,7 +16,9 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 /// once, to rule out a zone changing between the two lookups. Exit code 1
 /// means at least one unexplained disagreement (with --strict, also ones
 /// where a side got no answer); 2 means no disagreement, but too many
-/// lookups went unanswered for the run to count (see [maxUnanswered]).
+/// lookups went unanswered for the run to count (see [maxUnanswered]), or
+/// the run stalled (see [maxRunTime]). Every minute, stderr lists the
+/// lookups still under way.
 Future<void> main(List<String> args) async {
   DnsTransport transport = DirectDnsTransport(InternetAddress('9.9.9.9'));
   var transportLabel = '9.9.9.9';
@@ -59,13 +61,41 @@ Future<void> main(List<String> args) async {
   final ours = _Ours(DnssecValidator(transport));
   final pool = _Pool(jobs);
 
-  Future<_Comparison> compare(_Query q) async {
-    var c = _Comparison(q, await pool.run(() => ours.lookup(q)), await pool.run(() => unbound.lookup(q)));
-    if (c.verdict != _Verdict.agree) {
-      c = _Comparison(q, await pool.run(() => ours.lookup(q)), await pool.run(() => unbound.lookup(q)));
+  // Lookups under way, by side, so that a run that stalls says where.
+  final inFlight = <String>{};
+  var finished = 0;
+  Future<_Outcome> tracked(String side, _Query q, Future<_Outcome> Function() lookup) async {
+    final key = '$side: $q';
+    inFlight.add(key);
+    try {
+      return await lookup();
+    } finally {
+      inFlight.remove(key);
     }
+  }
+
+  Future<_Comparison> compare(_Query q) async {
+    Future<_Comparison> once() async => _Comparison(q, await pool.run(() => tracked('ours', q, () => ours.lookup(q))),
+        await pool.run(() => tracked('unbound', q, () => unbound.lookup(q))));
+    var c = await once();
+    if (c.verdict != _Verdict.agree) c = await once();
+    finished++;
     return c;
   }
+
+  final progress = Stopwatch()..start();
+  String status() => '[${progress.elapsed.inSeconds} s] $finished lookups compared; in flight: '
+      '${inFlight.isEmpty ? 'none' : inFlight.join(', ')}';
+  final ticker = Timer.periodic(const Duration(seconds: 60), (_) => stderr.writeln(status()));
+  // A run normally takes two or three minutes. One that stalls says where
+  // and ends as unreliable (2), which CI retries, instead of running into
+  // the job's time limit.
+  final watchdog = Timer(maxRunTime, () async {
+    stderr.writeln('${status()}\nSTALLED: no result after ${maxRunTime.inMinutes} minutes; '
+        'giving up on this run.');
+    await stderr.flush();
+    exit(2);
+  });
 
   bool selected(_Query q) => only == null || q.name.contains(only);
 
@@ -83,6 +113,8 @@ Future<void> main(List<String> args) async {
   ].where(selected);
   results.addAll(await Future.wait(second.map(compare)));
 
+  ticker.cancel();
+  watchdog.cancel();
   print('Validator via $transportLabel vs ${await unbound.version()}');
   print('${results.length} lookups in ${sw.elapsed.inSeconds} s');
   final statuses = {
@@ -145,6 +177,9 @@ const _tlds = [
   'br', 'jp', 'au', 'ca', 'us', 'gov', 'edu', 'io', 'dev', 'app', 'xyz',
   'nu', 'be', 'at', 'dk', 'no', 'fi', 'pl', 'it', 'es', 'pt', 'ru', 'cn',
 ];
+
+/// Longest a whole run may take before it is given up as unreliable.
+const maxRunTime = Duration(minutes: 7);
 
 /// Share of lookups that may go unanswered on one side before the run as a
 /// whole is reported as unreliable.
