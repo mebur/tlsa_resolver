@@ -96,6 +96,11 @@ const _mutants = [
   _Mutant('lib/src/resolver.dart', 'bogus address lookup falls back to the host',
       'if (address.status == SecurityStatus.bogus || address.status == SecurityStatus.indeterminate) {',
       'if (false) {'),
+  // Transport
+  _Mutant('lib/src/transport/direct_transport.dart', 'no deadline for the whole TCP answer',
+      'return await exchange().timeout(timeout);', 'return await exchange();'),
+  _Mutant('lib/src/transport/direct_transport.dart', 'TCP write errors left uncaught',
+      's.done.ignore();', ''),
 ];
 
 Future<void> main(List<String> args) async {

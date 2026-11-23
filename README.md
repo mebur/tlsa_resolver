@@ -79,6 +79,9 @@ has **not been independently audited**. In its place:
   agrees with a strict reference reader, and on unchanged certificates with
   OpenSSL, so a TLSA record cannot match a key other than the one the
   server's certificate holds.
+* A third fuzz test runs the UDP/TCP and DoH transports against hostile
+  local servers and checks that each query ends within its timeout with an
+  answer or a `DnsTransportException`, never another error.
 * CI holds the validation code to at least 95% line coverage, and a weekly
   job plants about 30 bugs, one at a time, in the checks that keep forged
   data out (a skipped signature check, a denial accepted without its

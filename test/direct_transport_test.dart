@@ -70,6 +70,59 @@ void main() {
     expect(server.tcpQueries, 1);
   });
 
+  group('a hostile TCP server', () {
+    // Answers every UDP query as truncated, so the transport turns to TCP,
+    // where [serve] handles the connection.
+    Future<int> start(void Function(Socket client) serve) async {
+      final server = _LocalResolver((q) => _answer(q, truncated: true, records: 0), (q) => Uint8List(0));
+      final port = await server.start();
+      await server.tcp.close();
+      final tcp = await ServerSocket.bind(InternetAddress.loopbackIPv4, port);
+      tcp.listen(serve);
+      addTearDown(() async {
+        await server.stop();
+        await tcp.close();
+      });
+      return port;
+    }
+
+    test('cannot hold a query open by sending a byte at a time', () async {
+      final timers = <Timer>[];
+      addTearDown(() {
+        for (final t in timers) {
+          t.cancel();
+        }
+      });
+      final port = await start((client) {
+        client.done.ignore();
+        client.listen((_) {}, onError: (_) {});
+        // A length of 1000, then one byte every 100 ms: each gap is well
+        // within the timeout, the whole answer far beyond it.
+        client.add([0x03, 0xe8]);
+        timers.add(Timer.periodic(const Duration(milliseconds: 100), (t) {
+          try {
+            client.add([0]);
+          } on Object {
+            t.cancel();
+          }
+        }));
+      });
+      final transport =
+          DirectDnsTransport(InternetAddress.loopbackIPv4, port: port, timeout: const Duration(milliseconds: 500));
+      final sw = Stopwatch()..start();
+      await expectLater(transport.send(query), throwsA(isA<DnsTransportException>()));
+      expect(sw.elapsed, lessThan(const Duration(seconds: 2)));
+    });
+
+    test('resetting the connection is a transport error, not an uncaught one', () async {
+      final port = await start((client) => client.destroy());
+      final transport = DirectDnsTransport(InternetAddress.loopbackIPv4, port: port);
+      for (var i = 0; i < 20; i++) {
+        await expectLater(transport.send(query), throwsA(isA<DnsTransportException>()));
+      }
+    });
+  });
+
   test('a complete UDP answer needs no TCP', () async {
     final server = _LocalResolver((q) => _answer(q, truncated: false), (q) => _answer(q, truncated: false));
     final port = await server.start();
