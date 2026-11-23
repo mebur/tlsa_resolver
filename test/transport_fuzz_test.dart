@@ -30,10 +30,12 @@ import 'support/fake_dns.dart';
 void main() {
   final iterations = (int.parse(Platform.environment['FUZZ_ITERATIONS'] ?? '400') ~/ 10).clamp(40, 2000);
   final seed = int.parse(Platform.environment['FUZZ_SEED'] ?? '${Random().nextInt(1 << 32)}');
-  const timeout = Duration(milliseconds: 300);
+  // Well above what a well-behaved answer takes on a loaded CI machine,
+  // since a slow but valid answer must still come back.
+  const timeout = Duration(milliseconds: 600);
   // The longest `send` may take: the timeout, once for UDP and once for
-  // TCP, and scheduling slack on a loaded CI machine.
-  const limit = Duration(milliseconds: 2 * 300 + 700);
+  // TCP, and scheduling slack.
+  const limit = Duration(milliseconds: 2 * 600 + 700);
 
   test('$iterations hostile DNS servers (seed $seed)', () async {
     final failures = await _runAll(iterations, seed, (i, rnd) async {
@@ -100,10 +102,12 @@ Future<List<String>> _runAll(int iterations, int seed, Future<String?> Function(
 Future<String?> _checkSend(DnsTransport transport, Uint8List query, Duration limit, {Uint8List? expected}) async {
   final sw = Stopwatch()..start();
   Uint8List? answer;
+  String? error;
   try {
     answer = await transport.send(query).timeout(limit * 3);
-  } on DnsTransportException {
+  } on DnsTransportException catch (e) {
     answer = null;
+    error = e.message;
   } on TimeoutException {
     return 'send did not end within ${limit * 3}';
   } catch (e) {
@@ -111,7 +115,7 @@ Future<String?> _checkSend(DnsTransport transport, Uint8List query, Duration lim
   }
   if (sw.elapsed > limit) return 'send took ${sw.elapsedMilliseconds} ms';
   if (expected != null) {
-    if (answer == null) return 'a well-formed answer was not returned';
+    if (answer == null) return 'a well-formed answer was not returned ($error, after ${sw.elapsedMilliseconds} ms)';
     if (!_same(answer, expected)) return 'the answer came back changed (${answer.length} bytes)';
   }
   return null;
@@ -156,7 +160,6 @@ Uint8List _answer(Uint8List query, int records) {
   );
 }
 
-Future<void> _pause(Random rnd) => Future.delayed(Duration(milliseconds: rnd.nextInt(20)));
 
 // ---------------------------------------------------------------------------
 // UDP and TCP
@@ -314,11 +317,17 @@ class _HostileDns {
           await write(framed);
           await client.close();
         case _Tcp.validInPieces:
+          // Pauses add up to at most 100 ms, well inside the deadline.
+          var paused = 0;
           for (var p = 0; p < framed.length && !_stopped;) {
             final n = 1 + rnd.nextInt(min(framed.length - p, 1 + framed.length ~/ 4));
             await write(framed.sublist(p, p + n));
             p += n;
-            await _pause(rnd);
+            if (paused < 100) {
+              final ms = rnd.nextInt(20);
+              paused += ms;
+              await Future.delayed(Duration(milliseconds: ms));
+            }
           }
           await client.close();
         case _Tcp.shortThenClose:

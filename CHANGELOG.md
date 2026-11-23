@@ -14,6 +14,10 @@
   the query is written no longer causes an uncaught `SocketException`,
   which could end a Dart program; UDP socket errors and failures to bind
   are now `DnsTransportException`s as well.
+* `DirectDnsTransport`: the UDP query socket is bound without
+  `SO_REUSEADDR`. With it (Dart's default), Linux could give the socket a
+  port another socket had bound to a specific address, and the answer went
+  to that socket: the query timed out, and a local process could read it.
 * Tests: `test/transport_fuzz_test.dart` runs `DirectDnsTransport` and
   `DohTransport` against hostile local servers (garbage, wrong IDs,
   spoofed ports, broken TCP framing, bytes sent one at a time, malformed

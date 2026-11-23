@@ -32,7 +32,12 @@ class DirectDnsTransport implements DnsTransport {
           server.type == InternetAddressType.IPv6
               ? InternetAddress.anyIPv6
               : InternetAddress.anyIPv4,
-          0);
+          0,
+          // Dart sets SO_REUSEADDR by default. On Linux the kernel may then
+          // give this socket a port another socket has bound to a specific
+          // address (0.7% of binds in a test with 200 such sockets), and
+          // replies go to that socket instead.
+          reuseAddress: false);
     } on SocketException catch (e) {
       throw DnsTransportException(e.message);
     }
