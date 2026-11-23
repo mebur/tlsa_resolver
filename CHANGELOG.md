@@ -17,6 +17,11 @@
   `DohTransport` against hostile local servers (garbage, wrong IDs,
   spoofed ports, broken TCP framing, bytes sent one at a time, malformed
   HTTP, oversized bodies, resets), and found the two bugs above.
+* Tests: `test/wire_fuzz_test.dart` fuzzes the DNS message parser on its
+  own: corrupted messages parse or throw `FormatException`, anything that
+  parses re-encodes (with and without name compression, by a separate
+  encoder) to the same message, the RDATA readers only throw
+  `FormatException`, and names survive presentation format.
 * Tests: `test/spki_fuzz_test.dart` fuzzes the SubjectPublicKeyInfo
   extractor against a strict reference DER reader, on certificates in
   `test/x509` whose keys are checked against OpenSSL.

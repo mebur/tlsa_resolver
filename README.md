@@ -82,6 +82,9 @@ has **not been independently audited**. In its place:
 * A third fuzz test runs the UDP/TCP and DoH transports against hostile
   local servers and checks that each query ends within its timeout with an
   answer or a `DnsTransportException`, never another error.
+* A fourth fuzz test corrupts DNS messages and checks the parser below the
+  validator: it throws only `FormatException`, and whatever it accepts
+  re-encodes, with or without name compression, to the same message.
 * CI holds the validation code to at least 95% line coverage, and a weekly
   job plants about 30 bugs, one at a time, in the checks that keep forged
   data out (a skipped signature check, a denial accepted without its
