@@ -185,11 +185,50 @@ List<_Query> _corpus() => [
         'sigok.verteiltesysteme.net',
       ])
         _Query(name, RRType.a, 'broken'),
+      // extended-dns-errors.com: one subdomain per misconfiguration, each
+      // asked for its address and for a name below it (denial proofs).
+      for (final sub in _edeSubdomains) ...[
+        _Query('$sub.extended-dns-errors.com', RRType.a, 'ede'),
+        _Query('$_missing.$sub.extended-dns-errors.com', RRType.a, 'ede'),
+      ],
     ];
+
+/// The subdomains of extended-dns-errors.com, from its list at
+/// https://extended-dns-errors.com/assets/domains.txt (November 2026).
+/// Each is broken in one way, or is a control (valid, unsigned).
+final _edeSubdomains = [
+  'valid', 'unsigned',
+  // Signing algorithms
+  'rsamd5', 'dsa', 'rsasha1', 'dsa-nsec3-sha1', 'rsasha1-nsec3-sha1',
+  'rsasha256', 'rsasha512', 'ecdsap256sha256', 'ecdsap384sha384', 'ed25519',
+  'ed448',
+  // NSEC3 additional iterations (RFC 9276)
+  for (final i in [0, 1, 50, 100, 150, 200, 500, 1000, 1500, 2000, 2500]) 'nsec3-iter-$i',
+  // DS at the parent
+  'no-ds', 'ds-bad-tag', 'ds-bad-key-algo', 'ds-unassigned-key-algo',
+  'ds-reserved-key-algo', 'ds-unassigned-digest-algo', 'ds-bogus-digest-value',
+  // NSEC3 chain
+  'no-nsec3', 'no-nsec3-rrsig', 'no-nsec3param', 'no-nsec3param-nsec3',
+  'bad-nsec3-hash', 'bad-nsec3-next', 'bad-nsec3-rrsig', 'bad-nsec3param-salt',
+  // DNSKEY RRset
+  'no-zsk', 'no-ksk', 'no-dnskey', 'bad-zsk', 'bad-ksk', 'no-dnskey-rrsig',
+  'bad-dnskey-rrsig', 'no-dnskey-256', 'no-dnskey-257', 'no-dnskey-256-257',
+  'bad-zsk-algo', 'bad-ksk-algo', 'unassigned-zsk-algo', 'unassigned-ksk-algo',
+  'reserved-zsk-algo', 'reserved-ksk-algo',
+  // Signatures
+  'no-rrsig-all', 'no-rrsig-a', 'rrsig-exp-all', 'rrsig-exp-a',
+  'rrsig-exp-before-all', 'rrsig-exp-before-a', 'rrsig-not-yet-all',
+  'rrsig-not-yet-a',
+  // Unreachable or lame name servers
+  'allow-query-none', 'allow-query-localhost', 'v4-doc', 'v6-doc', 'not-auth',
+  // Name servers that answer with a given extended error code
+  for (final code in [for (var c = 0; c <= 30; c++) c, 10000, 50000]) 'ede-$code',
+];
 
 /// Disagreements that follow from a documented difference, not a bug.
 _KnownDifference? _knownDifference(_Query q, _Outcome ours, _Outcome unbound) {
-  if (RegExp(r'\.d\da16n\d\.rootcanary\.net$').hasMatch(q.name) &&
+  if (RegExp(r'(\.d\da16n\d\.rootcanary\.net|\.ed448\.extended-dns-errors\.com|^ed448\.extended-dns-errors\.com)$')
+          .hasMatch(q.name) &&
       ours.status == SecurityStatus.insecure) {
     return const _KnownDifference('Ed448 (algorithm 16) is not supported, so the zone is insecure');
   }

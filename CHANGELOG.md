@@ -4,6 +4,11 @@
   including an `HttpClient` that checks the certificate before sending
   anything, and how to change keys without locking clients out.
   `tool/dane_connect.dart` gains `pinned` and `pinnedHttpClient`.
+* Tests: `test/spki_fuzz_test.dart` fuzzes the SubjectPublicKeyInfo
+  extractor against a strict reference DER reader, on certificates in
+  `test/x509` whose keys are checked against OpenSSL.
+* The differential test against Unbound also covers the ~100 deliberately
+  misconfigured zones of extended-dns-errors.com.
 
 ## 0.2.0
 

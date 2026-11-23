@@ -57,7 +57,7 @@ jobs:
       - run: dart run tool/mutants.dart
 
   differential:
-    # Compares the validator with Unbound on ~750 live lookups; see
+    # Compares the validator with Unbound on ~950 live lookups; see
     # tool/differential.dart.
     runs-on: ubuntu-latest
     timeout-minutes: 20
