@@ -81,17 +81,23 @@ jobs:
           echo "::error::unbound-host cannot resolve the root zone from this runner"
           exit 1
       # Exit code 2 is a run spoiled by the network (too many unanswered
-      # lookups); it is retried once. A real disagreement (1) fails at once.
+      # lookups, or so slow that it stalled); it is retried once, and if that
+      # is spoiled too, it warns instead of failing, as root-anchors does:
+      # the runner's DNS is at times very slow on both sides. A real
+      # disagreement (1) fails at once.
       - name: Compare with Unbound
         run: |
           for attempt in 1 2; do
             code=0
             dart run tool/differential.dart --server 9.9.9.9 --unbound-config tool/unbound-host.conf || code=$?
             if [ "$code" -ne 2 ]; then exit "$code"; fi
+            if [ "$attempt" -eq 2 ]; then
+              echo "::warning::Both differential runs were unreliable (network, or they stalled); no result"
+              exit 0
+            fi
             echo "::warning::Differential run $attempt was unreliable (network, or it stalled); retrying"
             sleep 60
           done
-          exit 2
 
   root-anchors:
     # The built-in root trust anchors against IANA's list, so a root key
