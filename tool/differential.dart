@@ -10,7 +10,12 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 /// on its own), and reports every answer they disagree on.
 ///
 ///   dart run tool/differential.dart [--server 9.9.9.9 | --system | --doh URL]
-///       [--unbound-host PATH] [--jobs 8] [--only SUBSTRING] [--strict]
+///       [--unbound-host PATH] [--unbound-config PATH] [--jobs 8]
+///       [--only SUBSTRING] [--strict]
+///
+/// `--unbound-config` passes a config file to every `unbound-host` run, such
+/// as tool/unbound/forward.conf, which sends its queries to a shared cache
+/// (tool/unbound/cache.conf) instead of resolving from the root each time.
 ///
 /// Both sides use the same root trust anchors. A disagreement is retried
 /// once, to rule out a zone changing between the two lookups. Exit code 1
@@ -23,6 +28,7 @@ Future<void> main(List<String> args) async {
   DnsTransport transport = DirectDnsTransport(InternetAddress('9.9.9.9'));
   var transportLabel = '9.9.9.9';
   var unboundHost = 'unbound-host';
+  String? unboundConfig;
   var jobs = 8;
   var strict = false;
   String? only;
@@ -40,6 +46,8 @@ Future<void> main(List<String> args) async {
         transport = DohTransport(endpoint);
       case '--unbound-host':
         unboundHost = args[++i];
+      case '--unbound-config':
+        unboundConfig = args[++i];
       case '--jobs':
         jobs = int.parse(args[++i]);
       case '--only':
@@ -57,7 +65,7 @@ Future<void> main(List<String> args) async {
       for (final ds in rootTrustAnchors)
         '. DS ${ds.keyTag} ${ds.algorithm} ${ds.digestType} ${_hex(ds.digest)}',
     ].join('\n'));
-  final unbound = _Unbound(unboundHost, anchors.path);
+  final unbound = _Unbound(unboundHost, anchors.path, unboundConfig);
   final ours = _Ours(DnssecValidator(transport));
   final pool = _Pool(jobs);
 
@@ -327,9 +335,10 @@ class _Ours {
 }
 
 class _Unbound {
-  _Unbound(this.executable, this.anchors);
+  _Unbound(this.executable, this.anchors, this.config);
   final String executable;
   final String anchors;
+  final String? config;
   static const timeout = Duration(seconds: 30);
 
   Future<String> version() async {
@@ -346,7 +355,7 @@ class _Unbound {
     // unbound-host has no timeout of its own and can hang on an
     // unresponsive server; it is killed after [timeout].
     final process = await Process.start(
-        executable, ['-v', '-f', anchors, '-t', RRType.name(q.type), q.name]);
+        executable, ['-v', if (config != null) ...['-C', config!], '-f', anchors, '-t', RRType.name(q.type), q.name]);
     final stdout = process.stdout.transform(systemEncoding.decoder).join();
     final stderr = process.stderr.transform(systemEncoding.decoder).join();
     final exited = await process.exitCode.then((_) => true).timeout(timeout, onTimeout: () {
@@ -508,14 +517,20 @@ class _Pool {
     if (_running >= size) {
       final turn = Completer<void>();
       _waiting.add(turn);
+      // The finishing task hands its slot over without giving it up, so a
+      // newcomer cannot take it while this one is still waking up.
       await turn.future;
+    } else {
+      _running++;
     }
-    _running++;
     try {
       return await task();
     } finally {
-      _running--;
-      if (_waiting.isNotEmpty) _waiting.removeFirst().complete();
+      if (_waiting.isNotEmpty) {
+        _waiting.removeFirst().complete();
+      } else {
+        _running--;
+      }
     }
   }
 }

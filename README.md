@@ -426,6 +426,15 @@ dart run tool/differential.dart               # validator via 9.9.9.9
 dart run tool/differential.dart --system      # via the system resolver
 ```
 
+Each `unbound-host` run starts with an empty cache and resolves from the
+root again. For faster runs, give them a shared cache, as CI does. The
+cache does not validate; `unbound-host` still checks every answer:
+
+```sh
+unbound -c tool/unbound/cache.conf &
+dart run tool/differential.dart --unbound-config tool/unbound/forward.conf
+```
+
 It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed
 in the tool with their reason; currently that is only Ed448 (algorithm 16),
