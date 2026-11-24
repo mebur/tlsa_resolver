@@ -68,27 +68,25 @@ jobs:
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
-      # The packaged service is not needed: the step below runs its own
-      # cache.
-      - run: |
-          sudo apt-get update && sudo apt-get install -y unbound unbound-host
-          sudo systemctl disable --now unbound || true
+      - run: sudo apt-get update && sudo apt-get install -y unbound-host
       - run: flutter pub get
-      # One shared cache for all unbound-host runs; each would otherwise
-      # resolve from the root again, which from the runner's network has
-      # taken over 15 minutes. unbound-host still validates on its own.
-      - name: Start an Unbound cache
+      # unbound-host exits 0 also on SERVFAIL, so look for the answer.
+      - name: Check that unbound-host can resolve
         run: |
-          unbound -c tool/unbound/cache.conf > "$RUNNER_TEMP/unbound.log" 2>&1 &
-          sleep 1
-          unbound-host -C tool/unbound/forward.conf -t SOA . || { cat "$RUNNER_TEMP/unbound.log"; exit 1; }
+          for attempt in 1 2 3; do
+            unbound-host -C tool/unbound-host.conf -t SOA . | tee "$RUNNER_TEMP/soa.txt"
+            if grep -q 'has SOA record' "$RUNNER_TEMP/soa.txt"; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::unbound-host cannot resolve the root zone from this runner"
+          exit 1
       # Exit code 2 is a run spoiled by the network (too many unanswered
       # lookups); it is retried once. A real disagreement (1) fails at once.
       - name: Compare with Unbound
         run: |
           for attempt in 1 2; do
             code=0
-            dart run tool/differential.dart --server 9.9.9.9 --unbound-config tool/unbound/forward.conf || code=$?
+            dart run tool/differential.dart --server 9.9.9.9 --unbound-config tool/unbound-host.conf || code=$?
             if [ "$code" -ne 2 ]; then exit "$code"; fi
             echo "::warning::Differential run $attempt was unreliable (network, or it stalled); retrying"
             sleep 60

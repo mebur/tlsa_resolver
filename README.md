@@ -426,14 +426,9 @@ dart run tool/differential.dart               # validator via 9.9.9.9
 dart run tool/differential.dart --system      # via the system resolver
 ```
 
-Each `unbound-host` run starts with an empty cache and resolves from the
-root again. For faster runs, give them a shared cache, as CI does. The
-cache does not validate; `unbound-host` still checks every answer:
-
-```sh
-unbound -c tool/unbound/cache.conf &
-dart run tool/differential.dart --unbound-config tool/unbound/forward.conf
-```
+On a host without working IPv6 (GitHub's runners, for one), add
+`--unbound-config tool/unbound-host.conf`, or `unbound-host` waits on every
+name server's IPv6 address and most lookups fail.
 
 It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed

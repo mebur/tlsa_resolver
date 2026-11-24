@@ -14,8 +14,7 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 ///       [--only SUBSTRING] [--strict]
 ///
 /// `--unbound-config` passes a config file to every `unbound-host` run, such
-/// as tool/unbound/forward.conf, which sends its queries to a shared cache
-/// (tool/unbound/cache.conf) instead of resolving from the root each time.
+/// as tool/unbound-host.conf, which turns IPv6 off for hosts without it.
 ///
 /// Both sides use the same root trust anchors. A disagreement is retried
 /// once, to rule out a zone changing between the two lookups. Exit code 1
