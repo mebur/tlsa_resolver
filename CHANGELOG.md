@@ -1,4 +1,4 @@
-## Unreleased
+## 0.2.1
 
 * README: how to pin your own backend's certificate with a TLSA record,
   including an `HttpClient` that checks the certificate before sending
