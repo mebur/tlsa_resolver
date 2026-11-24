@@ -433,7 +433,8 @@ name server's IPv6 address and most lookups fail.
 It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed
 in the tool with their reason; currently that is only Ed448 (algorithm 16),
-which this package does not support. CI runs it on every push and weekly.
+which this package does not support. CI runs it on every push and weekly;
+a run the network spoils (exit code 2) is retried once and then only warns.
 
 * Signatures count up to `clockSkew` (default one hour) outside their
   validity period, since phone clocks are often a few minutes off;
