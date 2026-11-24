@@ -67,11 +67,24 @@ has **not been independently audited**. In its place:
   Ed25519 libraries disagree. Ed25519 keys and signatures built on
   small-order points, which that package accepts (with the identity key
   any signature verifies), are refused, as libsodium does.
-* A differential test compares every answer with Unbound on about 750 live
-  lookups across many TLDs, algorithms and denial types, in CI on every push
+* A differential test compares every answer with Unbound on about 950 live
+  lookups across many TLDs, algorithms and denial types, and the ~100
+  deliberately broken zones of extended-dns-errors.com, in CI on every push
   and weekly. The only difference is Ed448 (see below).
 * A fuzz test corrupts resolver responses and checks that no tampered
   answer is ever reported as secure.
+* A second fuzz test changes certificates (fields removed, swapped, resized
+  across length boundaries, lengths in long form, corrupted bytes) and
+  checks that the DER walk that finds the public key for DANE selector 1
+  agrees with a strict reference reader, and on unchanged certificates with
+  OpenSSL, so a TLSA record cannot match a key other than the one the
+  server's certificate holds.
+* A third fuzz test runs the UDP/TCP and DoH transports against hostile
+  local servers and checks that each query ends within its timeout with an
+  answer or a `DnsTransportException`, never another error.
+* A fourth fuzz test corrupts DNS messages and checks the parser below the
+  validator: it throws only `FormatException`, and whatever it accepts
+  re-encodes, with or without name compression, to the same message.
 * CI holds the validation code to at least 95% line coverage, and a weekly
   job plants about 30 bugs, one at a time, in the checks that keep forged
   data out (a skipped signature check, a denial accepted without its
@@ -395,19 +408,27 @@ credential is stored anywhere, and it runs the tests before publishing.
 
 ### Differential testing against Unbound
 
-`tool/differential.dart` looks up about 750 names with this validator and
+`tool/differential.dart` looks up about 950 names with this validator and
 with Unbound's `unbound-host`, which recurses and validates independently,
 using the same root trust anchors, and lists every answer they disagree on.
 The corpus covers signed and unsigned domains across many TLDs, denial
 proofs for missing names, DANE for SMTP at each domain's mail servers, and
 RootCanary's test zones for every algorithm, DS digest and NSEC type, each
-with a validly and an invalidly signed name.
+with a validly and an invalidly signed name. It also covers the subdomains
+of [extended-dns-errors.com](https://extended-dns-errors.com), each broken
+in one way (bad DS, missing or bad DNSKEYs, expired or missing signatures,
+broken NSEC3 chains, high NSEC3 iteration counts, lame servers), with a
+lookup at each subdomain and one below it for the denial proof.
 
 ```sh
 brew install unbound            # or: apt-get install unbound-host
 dart run tool/differential.dart               # validator via 9.9.9.9
 dart run tool/differential.dart --system      # via the system resolver
 ```
+
+On a host without working IPv6 (GitHub's runners, for one), add
+`--unbound-config tool/unbound-host.conf`, or `unbound-host` waits on every
+name server's IPv6 address and most lookups fail.
 
 It exits with 1 when the two disagree on whether an answer is secure, on the
 status, or on the data of a secure answer. Expected differences are listed

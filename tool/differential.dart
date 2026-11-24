@@ -10,17 +10,24 @@ import 'package:tlsa_resolver/tlsa_resolver.dart';
 /// on its own), and reports every answer they disagree on.
 ///
 ///   dart run tool/differential.dart [--server 9.9.9.9 | --system | --doh URL]
-///       [--unbound-host PATH] [--jobs 8] [--only SUBSTRING] [--strict]
+///       [--unbound-host PATH] [--unbound-config PATH] [--jobs 8]
+///       [--only SUBSTRING] [--strict]
+///
+/// `--unbound-config` passes a config file to every `unbound-host` run, such
+/// as tool/unbound-host.conf, which turns IPv6 off for hosts without it.
 ///
 /// Both sides use the same root trust anchors. A disagreement is retried
 /// once, to rule out a zone changing between the two lookups. Exit code 1
 /// means at least one unexplained disagreement (with --strict, also ones
 /// where a side got no answer); 2 means no disagreement, but too many
-/// lookups went unanswered for the run to count (see [maxUnanswered]).
+/// lookups went unanswered for the run to count (see [maxUnanswered]), or
+/// the run stalled (see [maxRunTime]). Every minute, stderr lists the
+/// lookups still under way.
 Future<void> main(List<String> args) async {
   DnsTransport transport = DirectDnsTransport(InternetAddress('9.9.9.9'));
   var transportLabel = '9.9.9.9';
   var unboundHost = 'unbound-host';
+  String? unboundConfig;
   var jobs = 8;
   var strict = false;
   String? only;
@@ -38,6 +45,8 @@ Future<void> main(List<String> args) async {
         transport = DohTransport(endpoint);
       case '--unbound-host':
         unboundHost = args[++i];
+      case '--unbound-config':
+        unboundConfig = args[++i];
       case '--jobs':
         jobs = int.parse(args[++i]);
       case '--only':
@@ -55,17 +64,45 @@ Future<void> main(List<String> args) async {
       for (final ds in rootTrustAnchors)
         '. DS ${ds.keyTag} ${ds.algorithm} ${ds.digestType} ${_hex(ds.digest)}',
     ].join('\n'));
-  final unbound = _Unbound(unboundHost, anchors.path);
+  final unbound = _Unbound(unboundHost, anchors.path, unboundConfig);
   final ours = _Ours(DnssecValidator(transport));
   final pool = _Pool(jobs);
 
-  Future<_Comparison> compare(_Query q) async {
-    var c = _Comparison(q, await pool.run(() => ours.lookup(q)), await pool.run(() => unbound.lookup(q)));
-    if (c.verdict != _Verdict.agree) {
-      c = _Comparison(q, await pool.run(() => ours.lookup(q)), await pool.run(() => unbound.lookup(q)));
+  // Lookups under way, by side, so that a run that stalls says where.
+  final inFlight = <String>{};
+  var finished = 0;
+  Future<_Outcome> tracked(String side, _Query q, Future<_Outcome> Function() lookup) async {
+    final key = '$side: $q';
+    inFlight.add(key);
+    try {
+      return await lookup();
+    } finally {
+      inFlight.remove(key);
     }
+  }
+
+  Future<_Comparison> compare(_Query q) async {
+    Future<_Comparison> once() async => _Comparison(q, await pool.run(() => tracked('ours', q, () => ours.lookup(q))),
+        await pool.run(() => tracked('unbound', q, () => unbound.lookup(q))));
+    var c = await once();
+    if (c.verdict != _Verdict.agree) c = await once();
+    finished++;
     return c;
   }
+
+  final progress = Stopwatch()..start();
+  String status() => '[${progress.elapsed.inSeconds} s] $finished lookups compared; in flight: '
+      '${inFlight.isEmpty ? 'none' : inFlight.join(', ')}';
+  final ticker = Timer.periodic(const Duration(seconds: 60), (_) => stderr.writeln(status()));
+  // A run normally takes two or three minutes. One that stalls says where
+  // and ends as unreliable (2), which CI retries, instead of running into
+  // the job's time limit.
+  final watchdog = Timer(maxRunTime, () async {
+    stderr.writeln('${status()}\nSTALLED: no result after ${maxRunTime.inMinutes} minutes; '
+        'giving up on this run.');
+    await stderr.flush();
+    exit(2);
+  });
 
   bool selected(_Query q) => only == null || q.name.contains(only);
 
@@ -83,6 +120,8 @@ Future<void> main(List<String> args) async {
   ].where(selected);
   results.addAll(await Future.wait(second.map(compare)));
 
+  ticker.cancel();
+  watchdog.cancel();
   print('Validator via $transportLabel vs ${await unbound.version()}');
   print('${results.length} lookups in ${sw.elapsed.inSeconds} s');
   final statuses = {
@@ -146,6 +185,9 @@ const _tlds = [
   'nu', 'be', 'at', 'dk', 'no', 'fi', 'pl', 'it', 'es', 'pt', 'ru', 'cn',
 ];
 
+/// Longest a whole run may take before it is given up as unreliable.
+const maxRunTime = Duration(minutes: 7);
+
 /// Share of lookups that may go unanswered on one side before the run as a
 /// whole is reported as unreliable.
 const maxUnanswered = 0.10;
@@ -185,11 +227,50 @@ List<_Query> _corpus() => [
         'sigok.verteiltesysteme.net',
       ])
         _Query(name, RRType.a, 'broken'),
+      // extended-dns-errors.com: one subdomain per misconfiguration, each
+      // asked for its address and for a name below it (denial proofs).
+      for (final sub in _edeSubdomains) ...[
+        _Query('$sub.extended-dns-errors.com', RRType.a, 'ede'),
+        _Query('$_missing.$sub.extended-dns-errors.com', RRType.a, 'ede'),
+      ],
     ];
+
+/// The subdomains of extended-dns-errors.com, from its list at
+/// https://extended-dns-errors.com/assets/domains.txt (November 2026).
+/// Each is broken in one way, or is a control (valid, unsigned).
+final _edeSubdomains = [
+  'valid', 'unsigned',
+  // Signing algorithms
+  'rsamd5', 'dsa', 'rsasha1', 'dsa-nsec3-sha1', 'rsasha1-nsec3-sha1',
+  'rsasha256', 'rsasha512', 'ecdsap256sha256', 'ecdsap384sha384', 'ed25519',
+  'ed448',
+  // NSEC3 additional iterations (RFC 9276)
+  for (final i in [0, 1, 50, 100, 150, 200, 500, 1000, 1500, 2000, 2500]) 'nsec3-iter-$i',
+  // DS at the parent
+  'no-ds', 'ds-bad-tag', 'ds-bad-key-algo', 'ds-unassigned-key-algo',
+  'ds-reserved-key-algo', 'ds-unassigned-digest-algo', 'ds-bogus-digest-value',
+  // NSEC3 chain
+  'no-nsec3', 'no-nsec3-rrsig', 'no-nsec3param', 'no-nsec3param-nsec3',
+  'bad-nsec3-hash', 'bad-nsec3-next', 'bad-nsec3-rrsig', 'bad-nsec3param-salt',
+  // DNSKEY RRset
+  'no-zsk', 'no-ksk', 'no-dnskey', 'bad-zsk', 'bad-ksk', 'no-dnskey-rrsig',
+  'bad-dnskey-rrsig', 'no-dnskey-256', 'no-dnskey-257', 'no-dnskey-256-257',
+  'bad-zsk-algo', 'bad-ksk-algo', 'unassigned-zsk-algo', 'unassigned-ksk-algo',
+  'reserved-zsk-algo', 'reserved-ksk-algo',
+  // Signatures
+  'no-rrsig-all', 'no-rrsig-a', 'rrsig-exp-all', 'rrsig-exp-a',
+  'rrsig-exp-before-all', 'rrsig-exp-before-a', 'rrsig-not-yet-all',
+  'rrsig-not-yet-a',
+  // Unreachable or lame name servers
+  'allow-query-none', 'allow-query-localhost', 'v4-doc', 'v6-doc', 'not-auth',
+  // Name servers that answer with a given extended error code
+  for (final code in [for (var c = 0; c <= 30; c++) c, 10000, 50000]) 'ede-$code',
+];
 
 /// Disagreements that follow from a documented difference, not a bug.
 _KnownDifference? _knownDifference(_Query q, _Outcome ours, _Outcome unbound) {
-  if (RegExp(r'\.d\da16n\d\.rootcanary\.net$').hasMatch(q.name) &&
+  if (RegExp(r'(\.d\da16n\d\.rootcanary\.net|\.ed448\.extended-dns-errors\.com|^ed448\.extended-dns-errors\.com)$')
+          .hasMatch(q.name) &&
       ours.status == SecurityStatus.insecure) {
     return const _KnownDifference('Ed448 (algorithm 16) is not supported, so the zone is insecure');
   }
@@ -253,9 +334,10 @@ class _Ours {
 }
 
 class _Unbound {
-  _Unbound(this.executable, this.anchors);
+  _Unbound(this.executable, this.anchors, this.config);
   final String executable;
   final String anchors;
+  final String? config;
   static const timeout = Duration(seconds: 30);
 
   Future<String> version() async {
@@ -272,7 +354,7 @@ class _Unbound {
     // unbound-host has no timeout of its own and can hang on an
     // unresponsive server; it is killed after [timeout].
     final process = await Process.start(
-        executable, ['-v', '-f', anchors, '-t', RRType.name(q.type), q.name]);
+        executable, ['-v', if (config != null) ...['-C', config!], '-f', anchors, '-t', RRType.name(q.type), q.name]);
     final stdout = process.stdout.transform(systemEncoding.decoder).join();
     final stderr = process.stderr.transform(systemEncoding.decoder).join();
     final exited = await process.exitCode.then((_) => true).timeout(timeout, onTimeout: () {
@@ -434,14 +516,20 @@ class _Pool {
     if (_running >= size) {
       final turn = Completer<void>();
       _waiting.add(turn);
+      // The finishing task hands its slot over without giving it up, so a
+      // newcomer cannot take it while this one is still waking up.
       await turn.future;
+    } else {
+      _running++;
     }
-    _running++;
     try {
       return await task();
     } finally {
-      _running--;
-      if (_waiting.isNotEmpty) _waiting.removeFirst().complete();
+      if (_waiting.isNotEmpty) {
+        _waiting.removeFirst().complete();
+      } else {
+        _running--;
+      }
     }
   }
 }

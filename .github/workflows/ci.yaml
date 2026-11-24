@@ -57,7 +57,7 @@ jobs:
       - run: dart run tool/mutants.dart
 
   differential:
-    # Compares the validator with Unbound on ~750 live lookups; see
+    # Compares the validator with Unbound on ~950 live lookups; see
     # tool/differential.dart.
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -70,15 +70,25 @@ jobs:
           channel: stable
       - run: sudo apt-get update && sudo apt-get install -y unbound-host
       - run: flutter pub get
+      # unbound-host exits 0 also on SERVFAIL, so look for the answer.
+      - name: Check that unbound-host can resolve
+        run: |
+          for attempt in 1 2 3; do
+            unbound-host -C tool/unbound-host.conf -t SOA . | tee "$RUNNER_TEMP/soa.txt"
+            if grep -q 'has SOA record' "$RUNNER_TEMP/soa.txt"; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::unbound-host cannot resolve the root zone from this runner"
+          exit 1
       # Exit code 2 is a run spoiled by the network (too many unanswered
       # lookups); it is retried once. A real disagreement (1) fails at once.
       - name: Compare with Unbound
         run: |
           for attempt in 1 2; do
             code=0
-            dart run tool/differential.dart --server 9.9.9.9 || code=$?
+            dart run tool/differential.dart --server 9.9.9.9 --unbound-config tool/unbound-host.conf || code=$?
             if [ "$code" -ne 2 ]; then exit "$code"; fi
-            echo "::warning::Differential run $attempt was unreliable (network); retrying"
+            echo "::warning::Differential run $attempt was unreliable (network, or it stalled); retrying"
             sleep 60
           done
           exit 2

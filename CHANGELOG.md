@@ -4,6 +4,34 @@
   including an `HttpClient` that checks the certificate before sending
   anything, and how to change keys without locking clients out.
   `tool/dane_connect.dart` gains `pinned` and `pinnedHttpClient`.
+* `DirectDnsTransport`: an answer over TCP now has one deadline,
+  `timeout`, for the whole exchange. Before, the timeout restarted with
+  each chunk, so a resolver sending a byte at a time could hold a query
+  open far longer (the validator's own lookup timeout still ended the
+  lookup, but the connection stayed open). A connection that opens only
+  after the deadline is closed at once.
+* `DirectDnsTransport`: a resolver that resets the TCP connection while
+  the query is written no longer causes an uncaught `SocketException`,
+  which could end a Dart program; UDP socket errors and failures to bind
+  are now `DnsTransportException`s as well.
+* `DirectDnsTransport`: the UDP query socket is bound without
+  `SO_REUSEADDR`. With it (Dart's default), Linux could give the socket a
+  port another socket had bound to a specific address, and the answer went
+  to that socket: the query timed out, and a local process could read it.
+* Tests: `test/transport_fuzz_test.dart` runs `DirectDnsTransport` and
+  `DohTransport` against hostile local servers (garbage, wrong IDs,
+  spoofed ports, broken TCP framing, bytes sent one at a time, malformed
+  HTTP, oversized bodies, resets), and found the two bugs above.
+* Tests: `test/wire_fuzz_test.dart` fuzzes the DNS message parser on its
+  own: corrupted messages parse or throw `FormatException`, anything that
+  parses re-encodes (with and without name compression, by a separate
+  encoder) to the same message, the RDATA readers only throw
+  `FormatException`, and names survive presentation format.
+* Tests: `test/spki_fuzz_test.dart` fuzzes the SubjectPublicKeyInfo
+  extractor against a strict reference DER reader, on certificates in
+  `test/x509` whose keys are checked against OpenSSL.
+* The differential test against Unbound also covers the ~100 deliberately
+  misconfigured zones of extended-dns-errors.com.
 
 ## 0.2.0
 
